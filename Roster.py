@@ -2,20 +2,21 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
-# 1. 纯净外观与深度清理 (彻底屏蔽所有官方干扰)
+# 1. 深度纯净配置 (彻底屏蔽官方干扰)
 st.set_page_config(page_title="Roster Pro", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
     <style>
     header, footer, #MainMenu {visibility: hidden !important;}
     div[data-testid="stStatusWidget"], button[title="Manage app"], 
-    iframe[title="manage-app-button"], .stAppDeployButton, [data-testid="stToolbar"] {
+    iframe[title="manage-app-button"], .stAppDeployButton, [data-testid="stToolbar"],
+    #viewer-badge, .viewerBadge_container__1QSob {
         display: none !important; visibility: hidden !important;
     }
     .block-container { padding-top: 1rem !important; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 核心连接与时间智能逻辑 ---
+# --- 2. 核心数据与逻辑 ---
 def get_data():
     try:
         url = st.secrets["connections"]["gsheets"]["spreadsheet"]
@@ -25,148 +26,152 @@ def get_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
-
-def finalize_time_input(t):
-    """老板视角优化：输入8变08:00，提高排班速度"""
+def finalize_t(t):
     t = str(t).strip()
-    if t.isdigit(): return f"{int(t):02d}:00"
-    return t
+    return f"{int(t):02d}:00" if t.isdigit() else t
 
-def calc_wage_details(s, e, rate):
-    """利益最大化算法：超过5小时扣除0.5h休息"""
+def calc_wage(s, e, rate):
     if not s or not e or s == "" or e == "": return 0.0, 0.0
     try:
-        s, e = finalize_time_input(s), finalize_time_input(e)
+        s, e = finalize_t(s), finalize_t(e)
         h1, m1 = map(float, s.split(':'))
         h2, m2 = map(float, e.split(':'))
         dur = (h2 + m2/60) - (h1 + m1/60)
         if dur < 0: dur += 24
-        actual = dur - 0.5 if dur > 5 else dur
+        actual = dur - 0.5 if dur > 5 else dur # 利益最大化
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
-# --- 3. 权限与登录 ---
+# --- 3. 登录与权限 ---
 staff_df, status = get_data()
 if "role" not in st.session_state: st.session_state.role = None
+
 if st.session_state.role is None:
     _, col_mid, _ = st.columns([1, 5, 1])
     with col_mid:
-        st.markdown("<h2 style='text-align: center;'>Roster 业务系统</h2>", unsafe_allow_html=True)
-        pwd = st.text_input("🔑 密码", type="password", placeholder="请输入访问密码...")
+        st.header("Roster 财务系统")
+        pwd = st.text_input("🔑 密码", type="password")
         if st.button("进入系统", use_container_width=True):
             if pwd == "boss2026": st.session_state.role = "owner"
             elif pwd == "manager888": st.session_state.role = "manager"
             st.rerun()
     st.stop()
 
-# 数据初始化
-if 'main_df' not in st.session_state:
-    days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+# --- 4. 时间与云端同步引擎 ---
+today = datetime.now().date()
+this_monday = today - timedelta(days=today.weekday())
+selected_date = st.date_input("📅 选择查看/排班周 (周一)", this_monday)
+actual_mon = selected_date - timedelta(days=selected_date.weekday())
+week_key = actual_mon.strftime("%Y-%m-%d")
+
+# 权限判断：是否为旧周 (超过14天即为只读)
+is_readonly = False
+if st.session_state.role == "manager":
+    if (this_monday - actual_mon).days > 14:
+        is_readonly = True
+        st.warning(f"⚠️ {week_key} 周排班已锁定，店长模式仅限只读。如需修改请联系老板。")
+
+# 初始化内存
+if 'cloud_db' not in st.session_state: st.session_state.cloud_db = {}
+
+# 自动从“云端”加载当前选择周的数据，如果没有则初始化
+if week_key not in st.session_state.cloud_db:
     df = pd.DataFrame({"员工": list(staff_df["姓名"])})
-    for d in days: df[f"{d}_起"], df[f"{d}_止"] = "", ""
-    st.session_state.main_df = df
+    for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
+        df[f"{d}_起"], df[f"{d}_止"] = "", ""
+    st.session_state.cloud_db[week_key] = df
 
-# --- 4. 主界面 ---
-# 日期选择
-selected_monday = st.date_input("📅 选择周一日期", datetime.now() - timedelta(days=datetime.now().weekday()))
-week_key = selected_monday.strftime("%Y-%m-%d")
+current_df = st.session_state.cloud_db[week_key]
 
-# A. 快速排班助手 (效率优化：支持班次微调)
-with st.expander("👤 快速录入 / 批量排班", expanded=False):
-    c1, c2, c3 = st.columns(3)
-    with c1: sn = st.selectbox("人员", list(staff_df["姓名"]))
-    with c2: days_sel = st.multiselect("日期多选", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
-    with c3: shift_base = st.selectbox("常用班次", ["自定义", "8-2", "10-6", "8-6", "2-6", "10-2"])
-    
-    base_val = {"8-2":("08:00","14:00"), "10-6":("10:00","18:00"), "8-6":("08:00","18:00"), "2-6":("14:00","18:00"), "10-2":("10:00","14:00")}.get(shift_base, ("",""))
-    cc1, cc2 = st.columns(2)
-    new_s = cc1.text_input("开始 (支持数字补全)", value=base_val[0])
-    new_e = cc2.text_input("结束", value=base_val[1])
-    if st.button("✨ 填入当前周表格", use_container_width=True):
-        for d in days_sel:
-            st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{d}_起"] = finalize_time_input(new_s)
-            st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{d}_止"] = finalize_time_input(new_e)
-        st.rerun()
+# --- 5. 功能区 ---
+st.title(f"🚀 {week_key} 周次明细")
 
-# B. 核心排班表 (全员撑开)
-column_config = {}
-for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
-    column_config[f"{d}_起"] = st.column_config.SelectboxColumn(f"{d}|起", options=TIME_OPTIONS)
-    column_config[f"{d}_止"] = st.column_config.SelectboxColumn(f"{d}|止", options=TIME_OPTIONS)
+# A. 快速录入 (只读状态下隐藏)
+if not is_readonly:
+    with st.expander("👤 快速录入助手", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1: sn = st.selectbox("员工", list(staff_df["姓名"]))
+        with c2: days_sel = st.multiselect("日期", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
+        with c3: shift = st.selectbox("班次", ["8-2", "10-6", "8-6", "2-6", "10-2"])
+        
+        base = {"8-2":("08:00","14:00"), "10-6":("10:00","18:00"), "8-6":("08:00","18:00"), "2-6":("14:00","18:00"), "10-2":("10:00","14:00")}.get(shift, ("",""))
+        cc1, cc2 = st.columns(2)
+        in_s = cc1.text_input("起 (输8自动补全)", value=base[0])
+        in_e = cc2.text_input("止", value=base[1])
+        if st.button("确定填入并预览"):
+            for d in days_sel:
+                current_df.loc[current_df['员工'] == sn, f"{d}_起"] = finalize_t(in_s)
+                current_df.loc[current_df['员工'] == sn, f"{d}_止"] = finalize_t(in_e)
+            st.session_state.cloud_db[week_key] = current_df
+            st.rerun()
 
-t_h = (len(st.session_state.main_df) + 1) * 35 + 60
-edited_df = st.data_editor(st.session_state.main_df, column_config=column_config, use_container_width=True, hide_index=True, height=t_h)
-st.session_state.main_df = edited_df
+# B. 核心表格
+t_h = (len(current_df) + 1) * 35 + 60
+edited_df = st.data_editor(
+    current_df, 
+    use_container_width=True, 
+    hide_index=True, 
+    height=t_h, 
+    disabled=is_readonly, # 关键：超过两周自动禁用编辑
+    key=f"editor_{week_key}"
+)
+st.session_state.cloud_db[week_key] = edited_df
 
-# --- 5. 财务分析中心 (老板专属) ---
+# 同步按钮 (只读状态下禁用)
+if not is_readonly:
+    if st.button(f"💾 同步 {week_key} 排班到云端", use_container_width=True):
+        st.session_state.cloud_db[week_key] = edited_df
+        st.success("✅ 同步成功！老板端已更新。")
+
+# --- 6. 财务分析 (老板专属) ---
 if st.session_state.role == "owner":
     st.divider()
-    st.header("💰 财务结算与成本分析")
+    st.header(f"📊 财务与工占比分析 ({week_key})")
     
     STAFF_DB = staff_df.set_index("姓名").to_dict('index')
     days_list = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    
-    settlement_list = []
     daily_h, daily_w = {d:0.0 for d in days_list}, {d:0.0 for d in days_list}
     t_cash, t_eft = 0.0, 0.0
+    settlement = []
 
     for _, row in edited_df.iterrows():
         name = row["员工"]
         rate = STAFF_DB.get(name, {}).get("时薪", 0)
         p_type = str(STAFF_DB.get(name, {}).get("类型", "cash")).upper()
-        
-        row_h, row_w = 0.0, 0.0
+        p_h, p_w = 0.0, 0.0
         for d in days_list:
-            h, w = calc_wage_details(row[f"{d}_起"], row[f"{d}_止"], rate)
+            h, w = calc_wage(row[f"{d}_起"], row[f"{d}_止"], rate)
             daily_h[d] += h
             daily_w[d] += w
-            row_h += h
-            row_w += w
-            
-        if p_type == "CASH": t_cash += row_w
-        else: t_eft += row_w
-        
-        settlement_list.append({
-            "员工": name,
-            "每周总时长(h)": row_h,
-            "时薪": f"${rate}",
-            "周薪结余": f"${round(row_w, 2)}",
-            "类型": p_type
-        })
+            p_h += h
+            p_w += w
+        if p_type == "CASH": t_cash += p_w
+        else: t_eft += p_w
+        settlement.append({"员工": name, "工时(h)": p_h, "周薪": f"${round(p_w, 2)}", "支付": p_type})
 
-    # C. 支付汇总看板
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("现金汇总 (Cash)", f"${round(t_cash, 2)}")
-    m2.metric("转账汇总 (EFT)", f"${round(t_eft, 2)}")
-    m3.metric("总工资成本", f"${round(t_cash + t_eft, 2)}")
-    m4.metric("全周总时长", f"{round(sum(daily_h.values()), 1)} h")
-
-    # D. 营业额与工占比分析
-    st.write("点击填写每日营业额 ($):")
+    # 营业额录入 (去除0.0干扰)
     sc = st.columns(7)
-    sales = {}
-    for i, d in enumerate(days_list):
-        # 优化：value=None 让输入框变空，无需删除 0.0
-        val = sc[i].number_input(d, value=None, step=100.0, key=f"s_{d}", placeholder="输入")
-        sales[d] = val if val is not None else 0.0
-
-    # 包含每周合计的分析表
-    analysis_data = {
-        "指标": ["总工时 (h)", "总工资 ($)", "工占比 (%)"],
-        **{d: [daily_h[d], round(daily_w[d], 2), f"{round(daily_w[d]/sales[d]*100, 1) if sales[d]>0 else 0}%"] for d in days_list}
-    }
+    sales = {d: sc[i].number_input(d, value=None, placeholder="输入", key=f"s_{d}_{week_key}") or 0.0 for i, d in enumerate(days_list)}
     
-    # 增加“每周合计”列
-    total_sales = sum(sales.values())
-    total_wages = t_cash + t_eft
-    analysis_data["每周总计"] = [
-        round(sum(daily_h.values()), 1),
-        round(total_wages, 2),
-        f"{round(total_wages/total_sales*100, 1) if total_sales>0 else 0}%"
-    ]
+    # 汇总看板
+    tot_s = sum(sales.values())
+    tot_w = t_cash + t_eft
     
-    st.table(pd.DataFrame(analysis_data))
+    analysis_df = pd.DataFrame({
+        "指标": ["总工时(h)", "总工资($)", "工占比(%)"],
+        **{d: [daily_h[d], round(daily_w[d], 2), f"{round(daily_w[d]/sales[d]*100, 1) if sales[d]>0 else 0}%"] for d in days_list},
+        "每周合计": [round(sum(daily_h.values()), 1), round(tot_w, 2), f"{round(tot_w/tot_s*100, 1) if tot_s>0 else 0}%"]
+    })
+    st.table(analysis_df)
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Cash 现金准备", f"${round(t_cash, 2)}")
+    m2.metric("EFT 转账汇总", f"${round(t_eft, 2)}")
+    m3.metric("全周总时长", f"{round(sum(daily_h.values()), 1)} h")
 
-    with st.expander("📑 查看员工工资单明细"):
-        st.table(pd.DataFrame(settlement_list))
+    with st.expander("📑 查看本周工资单明细"):
+        st.table(pd.DataFrame(settlement))
+
+if st.sidebar.button("退出系统"):
+    st.session_state.role = None
+    st.rerun()
