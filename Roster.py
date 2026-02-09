@@ -44,7 +44,7 @@ def calc_wage(s, e, rate):
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
-# --- 3. 手写稿初始排班数据 (包含 Chhay) ---
+# --- 3. 手写稿初始排班数据 (含 Chhay) ---
 def load_fixed_template(staff_list):
     days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     df = pd.DataFrame({"员工": staff_list})
@@ -112,7 +112,7 @@ current_df = st.session_state.cloud_db[week_key]
 # --- 5. 功能展示 ---
 st.title(f"🚀 {week_key} 排班明细")
 
-# 【回归】快速录入助手
+# 【快速排班助手】
 if not is_readonly:
     with st.expander("👤 快速排班导入", expanded=True):
         c1, c2, c3 = st.columns(3)
@@ -141,7 +141,7 @@ if not is_readonly and st.button(f"💾 同步 {week_key} 数据"):
     st.session_state.cloud_db[week_key] = edited_df
     st.toast("云端已同步")
 
-# --- 6. 财务分析 (仅老板) ---
+# --- 6. 财务分析 (老板专属) ---
 if st.session_state.role == "owner":
     st.divider()
     st.header(f"💰 财务汇总与工占比 ({week_key})")
@@ -149,7 +149,7 @@ if st.session_state.role == "owner":
     days_list = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     daily_h, daily_w = {d:0.0 for d in days_list}, {d:0.0 for d in days_list}
     t_cash, t_eft = 0.0, 0.0
-    settle = []
+    settle_list = [] # 用于存储个人明细
 
     for _, row in edited_df.iterrows():
         name = row["员工"]; rate = STAFF_DB.get(name, {}).get("时薪", 0); p_type = str(STAFF_DB.get(name,{}).get("类型","cash")).upper()
@@ -159,11 +159,19 @@ if st.session_state.role == "owner":
             daily_h[d] += h; daily_w[d] += w; p_h += h; p_w += w
         if p_type == "CASH": t_cash += p_w
         else: t_eft += p_w
-        settle.append({"员工": name, "工时": p_h, "工资": f"${round(p_w, 2)}", "支付": p_type})
+        # 收集个人明细数据
+        settle_list.append({
+            "员工姓名": name, 
+            "本周总工时": p_h, 
+            "本周总工资": f"${round(p_w, 2)}", 
+            "支付方式": p_type
+        })
 
+    # 1. 营业额录入
     sc = st.columns(7)
     sales = {d: sc[i].number_input(d, value=None, placeholder="输入", key=f"s_{d}_{week_key}") or 0.0 for i, d in enumerate(days_list)}
     
+    # 2. 汇总分析表
     tot_s, tot_w, tot_h = sum(sales.values()), t_cash + t_eft, sum(daily_h.values())
     analysis_df = pd.DataFrame({
         "指标": ["总工时(h)", "总工资($)", "工占比(%)"],
@@ -171,7 +179,14 @@ if st.session_state.role == "owner":
         "每周总计": [round(tot_h, 1), round(tot_w, 2), f"{round(tot_w/tot_s*100, 1) if tot_s>0 else 0}%"]
     })
     st.table(analysis_df)
+    
+    # 3. 核心指标
     m1, m2, m3 = st.columns(3)
     m1.metric("Cash 结算", f"${round(t_cash, 2)}")
     m2.metric("EFT 汇总", f"${round(t_eft, 2)}")
     m3.metric("全周工时", f"{round(tot_h, 1)} h")
+
+    # 4. 【恢复】个人工资明细清单
+    st.divider()
+    st.markdown("### 📑 员工工资明细清单")
+    st.table(pd.DataFrame(settle_list))
