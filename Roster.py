@@ -6,8 +6,22 @@ from streamlit_gsheets import GSheetsConnection
 # 页面基本配置
 st.set_page_config(page_title="Roster", layout="wide")
 
-# --- 1. 连接数据库逻辑 (增加错误保护) ---
+# --- 1. 诊断版连接逻辑 ---
 conn = st.connection("gsheets", type=GSheetsConnection)
+
+try:
+    # 强制打印出正在尝试连接的配置（仅供诊断）
+    # 如果这里显示的是空，说明 Secrets 根本没被 Streamlit 读取到
+    secrets_status = st.secrets.get("connections", {}).get("gsheets", {}).get("spreadsheet", "未找到URL")
+    
+    # 尝试读取数据
+    staff_df = conn.read(worksheet="Staff", ttl=0)
+    STAFF_DB = staff_df.set_index("姓名").to_dict('index')
+    st.success("✅ Google Sheets 连接成功！")
+except Exception as e:
+    st.error(f"❌ 诊断信息: {str(e)}")
+    st.info(f"当前系统读取到的 URL 是: {secrets_status}")
+    STAFF_DB = {}
 
 # 初始化 staff_df 以防读取失败
 staff_df = pd.DataFrame(columns=["姓名", "时薪", "类型"])
