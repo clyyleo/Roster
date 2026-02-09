@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import io
 
 # 1. 基础配置
 st.set_page_config(page_title="Roster Pro", layout="wide")
@@ -19,7 +18,7 @@ def get_data_ultimate():
 
 staff_df, status = get_data_ultimate()
 
-# --- 3. 登录逻辑 (双重密码) ---
+# --- 3. 登录与权限 (密码: boss2026 / manager888) ---
 if "role" not in st.session_state:
     st.session_state.role = None
 
@@ -31,25 +30,24 @@ if st.session_state.role is None:
         if st.button("立即登录", use_container_width=True):
             if pwd == "boss2026": st.session_state.role = "owner"
             elif pwd == "manager888": st.session_state.role = "manager"
-            st.rerun() if st.session_state.role else st.error("密码错误")
+            if st.session_state.role: st.rerun()
+            else: st.error("密码错误")
     st.stop()
 
-# --- 4. 辅助函数 ---
+# --- 4. 计算与转换逻辑 ---
 def format_time_eng(t):
-    """转换时间显示: 08:00 -> 8, 09:30 -> 9:30"""
     if not t or ":" not in str(t): return ""
     h, m = str(t).split(':')
     return f"{int(h)}" if m == "00" else f"{int(h)}:{m}"
 
 def calc_wage(s, e, rate):
-    """利益最大化算法: >5h 扣 0.5h"""
     if not s or not e: return 0.0, 0.0
     try:
         h1, m1 = map(float, str(s).split(':'))
         h2, m2 = map(float, str(e).split(':'))
         dur = (h2 + m2/60) - (h1 + m1/60)
         if dur < 0: dur += 24
-        actual = dur - 0.5 if dur > 5 else dur
+        actual = dur - 0.5 if dur > 5 else dur # 利益最大化
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
@@ -57,68 +55,76 @@ def calc_wage(s, e, rate):
 if status == "success":
     STAFF_DB = staff_df.set_index("姓名").to_dict('index')
     days_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    days_en = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+    days_en = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     TIME_OPTIONS = [""] + [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
 
-    st.title(f"🚀 Roster 智能排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
+    st.title(f"🚀 Roster 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
     
-    # 顶部日期
+    # 周次选择
     selected_date = st.date_input("📅 选择起始周一", datetime.now() - timedelta(days=datetime.now().weekday()))
     week_str = f"{selected_date.strftime('%Y/%m/%d')} - {(selected_date+timedelta(days=6)).strftime('%Y/%m/%d')}"
 
-    # 初始化/同步功能
+    # 初始化数据
     if 'main_df' not in st.session_state:
         init_data = {"员工": list(STAFF_DB.keys())}
-        for d in days_cn: init_data[f"{d}_起"], init_data[f"{d}_止"] = [""]*len(STAFF_DB), [""]*len(STAFF_DB)
+        for d in days_cn:
+            init_data[f"{d}_起"], init_data[f"{d}_止"] = [""]*len(STAFF_DB), [""]*len(STAFF_DB)
         st.session_state.main_df = pd.DataFrame(init_data)
 
-    # 快捷按钮
-    c1, c2, _ = st.columns([1, 1, 2])
-    if c1.button("🔄 同步上周"):
+    # --- A. 顶部快速导入功能 ---
+    st.subheader("➕ 快速员工导入 (单独录入)")
+    with st.container(border=True):
+        c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.5, 1.5, 1])
+        with c1: sel_staff = st.selectbox("选择员工", list(STAFF_DB.keys()))
+        with c2: sel_day = st.selectbox("选择日期", days_cn)
+        with c3: in_s = st.selectbox("开始", options=TIME_OPTIONS, index=16)
+        with c4: in_e = st.selectbox("结束", options=TIME_OPTIONS, index=28)
+        with c5:
+            st.write("")
+            if st.button("填入表格"):
+                st.session_state.main_df.loc[st.session_state.main_df['员工'] == sel_staff, f"{sel_day}_起"] = in_s
+                st.session_state.main_df.loc[st.session_state.main_df['员工'] == sel_staff, f"{sel_day}_止"] = in_e
+                st.rerun()
+
+    # 同步与模板
+    btn_c1, btn_c2, _ = st.columns([1, 1, 3])
+    if btn_c1.button("🔄 同步上周"):
         if "tmpl" in st.session_state: st.session_state.main_df = st.session_state.tmpl.copy(); st.rerun()
-    if c2.button("💾 存为模板"):
+    if btn_c2.button("💾 存为模板"):
         st.session_state.tmpl = st.session_state.main_df.copy(); st.toast("模板已存")
 
-    # --- 排班表格 (视觉分区优化) ---
-    st.subheader(f"📊 内部录入预览 ({week_str})")
-    col_config = {"员工": st.column_config.TextColumn("STAFF", disabled=True, width="small")}
+    # --- B. 核心排班表格 (视觉分区优化) ---
+    st.subheader(f"📊 排班明细 ({week_str})")
+    col_config = {"员工": st.column_config.TextColumn("", disabled=True, width="small")}
     for d in days_cn:
-        # 给起止列加上明显的周几前缀，形成视觉分区
         col_config[f"{d}_起"] = st.column_config.SelectboxColumn(f"{d} | Start", options=TIME_OPTIONS, width="small")
         col_config[f"{d}_止"] = st.column_config.SelectboxColumn(f"{d} | End", options=TIME_OPTIONS, width="small")
 
     edited_df = st.data_editor(st.session_state.main_df, column_config=col_config, use_container_width=True, hide_index=True, key="vFinal")
     st.session_state.main_df = edited_df
 
-    # --- 6. 导出预览 (全英文 + 简洁格式) ---
+    # --- C. 导出图片预览 (英文简洁版) ---
     st.divider()
-    st.subheader("📸 Team Schedule Preview (English)")
-    
-    export_df = pd.DataFrame({"NAME": list(STAFF_DB.keys())})
-    for cn, en in zip(days_cn, days_en):
-        combined = []
-        for _, row in edited_df.iterrows():
-            s, e = row[f"{cn}_起"], row[f"{cn}_止"]
-            combined.append(f"{format_time_eng(s)}-{format_time_eng(e)}" if s and e else "-")
-        export_df[en] = combined
+    if st.button("✨ 生成工作组排班图 (English Preview)", use_container_width=True):
+        st.subheader(f"Team Schedule: {selected_date.strftime('%b %d')} - {(selected_date+timedelta(days=6)).strftime('%b %d')}")
+        
+        # 转换显示格式
+        export_df = pd.DataFrame({"NAME": list(STAFF_DB.keys())})
+        for cn, en in zip(days_cn, days_en):
+            combined = []
+            for _, row in edited_df.iterrows():
+                s, e = row[f"{cn}_起"], row[f"{cn}_止"]
+                combined.append(f"{format_time_eng(s)}-{format_time_eng(e)}" if s and e else "-")
+            export_df[en] = combined
+        
+        # 以简洁表格形式展示，方便手机截图
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+        st.info("💡 截图保存上方表格，即可直接发到工作组群！")
 
-    # 显示全英文表格
-    st.table(export_df)
-    
-    # 保存按键逻辑：转换为 CSV 模拟“保存数据”，或者你可以直接长按屏幕截图
-    csv = export_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 Download Schedule (Save to phone)",
-        data=csv,
-        file_name=f"Roster_{selected_date.strftime('%m%d')}.csv",
-        mime='text/csv',
-        use_container_width=True
-    )
-
-    # --- 7. 财务汇总 (仅老板) ---
+    # --- D. 财务汇总 (仅老板) ---
     if st.session_state.role == "owner":
         st.divider()
-        st.header("💰 Financial Center (Owner Only)")
+        st.header("💰 财务汇总 (Owner Only)")
         cash_total, eft_total = 0.0, 0.0
         for _, row in edited_df.iterrows():
             name = row["员工"]
@@ -129,8 +135,12 @@ if status == "success":
                 else: eft_total += p
         
         f1, f2 = st.columns(2)
-        f1.metric("Cash (Ready for withdrawal)", f"${round(cash_total, 2)}")
-        f2.metric("EFT (Bank Transfer)", f"${round(eft_total, 2)}")
+        f1.metric("Cash 现金准备", f"${round(cash_total, 2)}")
+        f2.metric("EFT 转账总额", f"${round(eft_total, 2)}")
 
 else:
-    st.error("Connection failed.")
+    st.error("无法读取 Google 表格，请确认链接权限。")
+
+if st.sidebar.button("退出系统"):
+    st.session_state.role = None
+    st.rerun()
