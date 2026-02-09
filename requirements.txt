@@ -1,3 +1,1 @@
-pandas
-st-gsheets-connection
-datetime
+st-gsheets-connection==0.0.3
