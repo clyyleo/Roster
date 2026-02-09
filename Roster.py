@@ -35,83 +35,88 @@ if st.session_state.role is None:
                 st.error("密码错误")
     st.stop()
 
-# --- 4. 核心计算函数 (含 >5h 减 0.5h 逻辑) ---
-def calc_wages(time_str, rate):
-    if not time_str or "-" not in str(time_str): return 0.0, 0.0
+# --- 4. 辅助函数：时间补全与计算 ---
+def format_time_input(val):
+    """手动输入数字自动补全为 00:00 格式"""
+    if not val: return ""
+    val = str(val).strip()
+    if ":" not in val:
+        try:
+            h = int(val)
+            return f"{h:02d}:00"
+        except: return val
+    return val
+
+def calc_daily_wage(start_t, end_t, rate):
+    """计算工时与工资 (包含 >5h 减 0.5h 逻辑)"""
+    if not start_t or not end_t: return 0.0, 0.0
     try:
-        start, end = str(time_str).split('-')
-        h1, m1 = map(float, start.strip().split(':'))
-        h2, m2 = map(float, end.strip().split(':'))
+        # 补全格式
+        s = format_time_input(start_t)
+        e = format_time_input(end_t)
+        h1, m1 = map(float, s.split(':'))
+        h2, m2 = map(float, e.split(':'))
         duration = (h2 + m2/60) - (h1 + m1/60)
-        if duration < 0: duration += 24
-        # 自动扣减 0.5h 休息
-        actual_hours = duration - 0.5 if duration > 5 else duration
-        return round(actual_hours, 2), round(actual_hours * rate, 2)
+        if duration < 0: duration += 24 # 跨天处理
+        
+        # 利益最大化：超过 5h 扣 0.5h
+        actual = duration - 0.5 if duration > 5 else duration
+        return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
 # --- 5. 主界面 ---
 if status == "success":
     STAFF_DB = staff_df.set_index("姓名").to_dict('index')
-    
-    # 日历与周次选择
+    TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]] #
+
     st.title("🚀 Roster 智能排班系统")
-    col_d1, col_d2 = st.columns([1.5, 3])
-    with col_d1:
-        selected_date = st.date_input("📅 选择周一日期", datetime.now() - timedelta(days=datetime.now().weekday()))
     
-    start_of_week = selected_date
-    end_of_week = start_of_week + timedelta(days=6)
-    week_str = f"{start_of_week.strftime('%Y/%m/%d')} - {end_of_week.strftime('%Y/%m/%d')}"
+    # 周次日历
+    selected_date = st.date_input("📅 选择周一日期", datetime.now() - timedelta(days=datetime.now().weekday()))
+    week_str = f"{selected_date.strftime('%Y/%m/%d')} - {(selected_date+timedelta(days=6)).strftime('%Y/%m/%d')}"
+
+    # --- A. 上方录入条 (保留之前功能) ---
+    st.subheader("➕ 快速员工导入")
+    with st.container(border=True):
+        c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
+        with c1: sel_staff = st.selectbox("员工", list(STAFF_DB.keys()))
+        with c2: sel_day = st.selectbox("日期", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
+        with c3: in_start = st.selectbox("开始时间", options=TIME_OPTIONS, index=16)
+        with c4: in_end = st.selectbox("结束时间", options=TIME_OPTIONS, index=28)
+        with c5:
+            st.write("")
+            if st.button("导入表格"):
+                key = f"{sel_staff}_{sel_day}"
+                st.session_state[f"{key}_start"] = in_start
+                st.session_state[f"{key}_end"] = in_end
+
+    # --- B. 下方排班表 (分列显示) ---
+    st.subheader(f"📊 排班明细 ({week_str})")
     
-    with col_d2:
-        st.info(f"📍 当前周次：**{week_str}**")
-
-    # 初始化数据
-    if 'df' not in st.session_state:
-        st.session_state.df = pd.DataFrame([[n]+[""]*7 for n in STAFF_DB.keys()], columns=["员工"]+["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
-
-    # --- 排班表主体 (红圈区域优化) ---
-    st.subheader(f"📊 排班明细表 ({week_str})")
+    # 构造数据结构：每个员工、每天都有“起”“止”两列
+    days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    data = {"员工": list(STAFF_DB.keys())}
+    for d in days:
+        data[f"{d}_起"] = [st.session_state.get(f"{n}_{d}_start", "") for n in STAFF_DB.keys()]
+        data[f"{d}_止"] = [st.session_state.get(f"{n}_{d}_end", "") for n in STAFF_DB.keys()]
     
-    # 顶部快捷操作栏
-    col_btn1, col_btn2, _ = st.columns([1, 1, 3])
-    with col_btn1:
-        if st.button("🔄 延续上周记录"):
-            st.toast("已尝试加载上周排班数据")
-    with col_btn2:
-        if st.button("🗑️ 清空全表"):
-            st.session_state.df = pd.DataFrame([[n]+[""]*7 for n in STAFF_DB.keys()], columns=["员工"]+["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
-            st.rerun()
+    df_display = pd.DataFrame(data)
 
-    # 时间下拉选项 (30分钟步长)
-    TIME_VALS = [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
-    # 组合成 "08:00-14:00" 这种格式的常用预选项，同时也支持格内直接打字修改
-    PRESETS = [""] + [f"{t1}-{t2}" for t1 in ["08:00", "09:00", "11:00", "17:00"] for t2 in ["14:00", "15:00", "21:00", "22:00"]]
+    # 表格配置
+    col_config = {"员工": st.column_config.TextColumn("员工", disabled=True, width="small")}
+    for d in days:
+        col_config[f"{d}_起"] = st.column_config.SelectboxColumn("起", options=TIME_OPTIONS, width="small")
+        col_config[f"{d}_止"] = st.column_config.SelectboxColumn("止", options=TIME_OPTIONS, width="small")
 
-    # 配置表格：开启 Selectbox 模式
-    column_config = {
-        "员工": st.column_config.TextColumn("员工", disabled=True),
-    }
-    for day in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
-        column_config[day] = st.column_config.SelectboxColumn(
-            day,
-            options=PRESETS, # 提供常用组合
-            required=False,
-            width="medium"
-        )
-
-    # 渲染编辑器
     edited_df = st.data_editor(
-        st.session_state.df,
-        column_config=column_config,
+        df_display,
+        column_config=col_config,
         use_container_width=True,
-        num_rows="fixed",
         hide_index=True,
-        key="main_editor"
+        key="main_roster"
     )
-    st.session_state.df = edited_df
 
-    # --- 6. 财务对账中心 (实时联动) ---
+    # --- 6. 财务对账中心 (自动汇总) ---
     st.divider()
     st.header("💰 财务对账中心")
     
@@ -119,24 +124,19 @@ if status == "success":
     
     for _, row in edited_df.iterrows():
         name = row["员工"]
-        rate = STAFF_DB.get(name, {}).get("时薪", 0)
-        pay_type = STAFF_DB.get(name, {}).get("类型", "cash")
+        rate = STAFF_DB.get(name, {}).get("时薪", 0) #
+        p_type = STAFF_DB.get(name, {}).get("类型", "cash") #
         
-        for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
-            h, p = calc_wages(row[d], rate)
+        for d in days:
+            h, p = calc_daily_wage(row[f"{d}_起"], row[f"{d}_止"], rate)
             hours_total += h
-            if str(pay_type).lower() == "cash": cash_total += p
+            if str(p_type).lower() == "cash": cash_total += p
             else: eft_total += p
     
-    c_f1, c_f2, c_f3 = st.columns(3)
-    c_f1.metric("准备现金 (Cash)", f"${round(cash_total, 2)}")
-    c_f2.metric("转账总额 (EFT)", f"${round(eft_total, 2)}")
-    c_f3.metric("汇总工时", f"{round(hours_total, 1)} h")
-
-    # 发布截图区域
-    if st.checkbox("🔍 显示发布用截图版"):
-        st.markdown(f"### 🥪 排班表: {week_str}")
-        st.table(edited_df)
+    f1, f2, f3 = st.columns(3)
+    f1.metric("准备现金 (Cash)", f"${round(cash_total, 2)}")
+    f2.metric("转账额 (EFT)", f"${round(eft_total, 2)}")
+    f3.metric("总工时", f"{round(hours_total, 1)} h")
 
 else:
-    st.error("无法加载员工数据，请检查 Google Sheets。")
+    st.error("数据加载失败")
