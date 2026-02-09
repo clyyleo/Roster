@@ -46,7 +46,7 @@ def calc_wage(s, e, rate):
         h2, m2 = map(float, str(e).split(':'))
         dur = (h2 + m2/60) - (h1 + m1/60)
         if dur < 0: dur += 24
-        actual = dur - 0.5 if dur > 5 else dur
+        actual = dur - 0.5 if dur > 5 else dur # 利益最大化
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
@@ -73,7 +73,6 @@ if status == "success":
     days_en = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     TIME_OPTIONS = [""] + [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
     
-    # 常用时间段映射
     PRESET_SHIFTS = {
         "自定义": None,
         "8-2": ("08:00", "14:00"),
@@ -90,26 +89,31 @@ if status == "success":
         for d in days_cn: init_data[f"{d}_起"], init_data[f"{d}_止"] = [""]*len(STAFF_DB), [""]*len(STAFF_DB)
         st.session_state.main_df = pd.DataFrame(init_data)
 
-    # A. 顶部快速录入助手 (升级版)
-    with st.expander("👤 快速录入/常用班次", expanded=True):
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1: sn = st.selectbox("人员", list(STAFF_DB.keys()))
-        with c2: sd = st.selectbox("日期", days_cn)
-        with c3: shift_choice = st.selectbox("常用班次", list(PRESET_SHIFTS.keys()))
+    # A. 顶部快速录入助手 (升级版：支持日期多选)
+    with st.expander("👤 批量/常用班次录入", expanded=True):
+        c1, c2 = st.columns([1, 1])
+        with c1: sn = st.selectbox("选择员工", list(STAFF_DB.keys()))
+        with c2: shift_choice = st.selectbox("常用班次", list(PRESET_SHIFTS.keys()))
+        
+        # 日期多选框
+        selected_days = st.multiselect("选择重复日期 (可多选)", days_cn, placeholder="点击勾选周几...")
         
         c4, c5, c6 = st.columns([1, 1, 1])
-        # 如果选了常用班次，自动填入时间，否则手动选
         preset = PRESET_SHIFTS[shift_choice]
         with c4: in_start = st.selectbox("Start", TIME_OPTIONS, index=TIME_OPTIONS.index(preset[0]) if preset else 16)
         with c5: in_end = st.selectbox("End", TIME_OPTIONS, index=TIME_OPTIONS.index(preset[1]) if preset else 28)
         with c6:
             st.write("")
-            if st.button("确定填入表格", use_container_width=True):
-                st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{sd}_起"] = in_start
-                st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{sd}_止"] = in_end
-                st.rerun()
+            if st.button("批量填入表格", use_container_width=True):
+                if not selected_days:
+                    st.warning("请至少选择一个日期")
+                else:
+                    for d in selected_days:
+                        st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{d}_起"] = in_start
+                        st.session_state.main_df.loc[st.session_state.main_df['员工'] == sn, f"{d}_止"] = in_end
+                    st.rerun()
 
-    # B. 排班表格 (强制全员高度)
+    # B. 排班表格
     st.write(f"### {sel_date.strftime('%m/%d')} 详细排班表")
     col_cfg = {"员工": st.column_config.TextColumn("", disabled=True, width="small")}
     for d in days_cn:
@@ -117,7 +121,7 @@ if status == "success":
         col_cfg[f"{d}_止"] = st.column_config.SelectboxColumn(f"{d}|止", options=TIME_OPTIONS, width="small")
 
     t_h = (len(st.session_state.main_df) + 1) * 35 + 50
-    edited_df = st.data_editor(st.session_state.main_df, column_config=col_cfg, use_container_width=True, hide_index=True, height=t_h, key="vFinalShift")
+    edited_df = st.data_editor(st.session_state.main_df, column_config=col_cfg, use_container_width=True, hide_index=True, height=t_h, key="vFinalMulti")
     st.session_state.main_df = edited_df
 
     # 同步与模板
@@ -127,7 +131,7 @@ if status == "success":
     if cc2.button("💾 存为模板", use_container_width=True):
         st.session_state.tmpl = st.session_state.main_df.copy(); st.toast("模板已存")
 
-    # C. 导出预览 (英文版用于截图)
+    # C. 导出预览
     st.divider()
     if st.button("✨ 生成工作组截图 (English Preview)", use_container_width=True):
         exp_df = pd.DataFrame({"NAME": list(STAFF_DB.keys())})
@@ -139,9 +143,9 @@ if status == "success":
             exp_df[en] = cb
         st.markdown(f"#### SCHEDULE: {sel_date.strftime('%b %d')} - {(sel_date+timedelta(days=6)).strftime('%b %d')}")
         st.dataframe(exp_df, use_container_width=True, hide_index=True)
-        st.info("💡 手机直接截图上方表格发到群组。")
+        st.info("💡 手机直接截图上方表格发给群组。")
 
-    # D. 财务结算 (老板专属)
+    # D. 财务汇总
     if st.session_state.role == "owner":
         st.divider()
         st.header("💰 财务汇总")
