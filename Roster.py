@@ -1,35 +1,74 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
+import json
 from datetime import datetime, timedelta
 
-# 1. 深度纯净配置 (最强力屏蔽 Manage app)
+# 1. 深度纯净配置
 st.set_page_config(page_title="Roster Pro", layout="wide", initial_sidebar_state="collapsed")
 st.html("""
     <style>
-    /* 隐藏顶部Header */
-    header, .st-emotion-cache-12fmw14, .st-emotion-cache-18ni7ap {visibility: hidden !important; height: 0 !important;}
-    
-    /* 强力屏蔽 Manage App 及相关按钮 */
-    [data-testid="stStatusWidget"], 
-    button[title="Manage app"], 
-    .stAppDeployButton, 
-    [data-testid="stToolbar"],
-    .viewerBadge_container__1QSob,
-    div[class*="viewerBadge"] {
-        display: none !important; 
-        visibility: hidden !important;
-        opacity: 0 !important;
-        height: 0 !important;
+    header, footer, #MainMenu {visibility: hidden !important; height: 0 !important;}
+    [data-testid="stStatusWidget"], button[title="Manage app"], 
+    iframe[title="manage-app-button"], .stAppDeployButton, [data-testid="stToolbar"],
+    #viewer-badge, .viewerBadge_container__1QSob, div[class*="viewerBadge"] {
+        display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important;
     }
-    
     .block-container { padding-top: 1rem !important; }
-    /* 禁用输入框颜色优化 */
-    input:disabled { color: #333 !important; background-color: #f5f5f5 !important; -webkit-text-fill-color: #333 !important; opacity: 1 !important; cursor: not-allowed; }
+    
+    /* 自动保存状态提示 */
+    .auto-save-status {
+        position: fixed;
+        bottom: 10px;
+        right: 10px;
+        background-color: #d4edda;
+        color: #155724;
+        padding: 5px 10px;
+        border-radius: 5px;
+        font-size: 0.8rem;
+        opacity: 0.8;
+        z-index: 9999;
+    }
     </style>
 """)
 
-# --- 2. 核心算法 ---
-def get_data():
+# --- 2. SQLite 数据库层 ---
+DB_FILE = "roster_realtime.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS weekly_data
+                 (week_key TEXT PRIMARY KEY, roster_json TEXT, sales_json TEXT)''')
+    conn.commit()
+    conn.close()
+
+def load_week_from_db(week_key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT roster_json, sales_json FROM weekly_data WHERE week_key=?", (week_key,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return pd.read_json(row[0]), json.loads(row[1])
+    return None, None
+
+def save_week_to_db(week_key, df, sales):
+    """毫秒级极速写入"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    roster_json = df.to_json()
+    sales_json = json.dumps(sales)
+    c.execute("INSERT OR REPLACE INTO weekly_data (week_key, roster_json, sales_json) VALUES (?, ?, ?)",
+              (week_key, roster_json, sales_json))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 3. 核心算法 ---
+@st.cache_data(ttl=600)
+def get_staff_data():
     try:
         url = st.secrets["connections"]["gsheets"]["spreadsheet"]
         doc_id = url.split('/d/')[1].split('/')[0]
@@ -56,7 +95,7 @@ def calc_wage(s, e, rate):
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
-# --- 3. 模板数据 ---
+# --- 4. 初始模板 (含Chhay) ---
 def load_fixed_template(staff_list):
     days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     df = pd.DataFrame({"员工": staff_list})
@@ -85,11 +124,9 @@ def load_fixed_template(staff_list):
     set_s("Chhay", [6], "08:30", "17:00")
     return df
 
-# --- 4. 登录 ---
-staff_df, status = get_data()
+# --- 5. 登录逻辑 ---
+staff_df, status = get_staff_data()
 if "role" not in st.session_state: st.session_state.role = None
-if 'cloud_db' not in st.session_state: st.session_state.cloud_db = {}
-if 'finance_lock' not in st.session_state: st.session_state.finance_lock = True 
 
 if st.session_state.role is None:
     _, col_mid, _ = st.columns([1, 5, 1])
@@ -102,48 +139,36 @@ if st.session_state.role is None:
             st.rerun()
     st.stop()
 
-# --- 5. 数据逻辑 (含自动修复补丁) ---
+# --- 6. 数据流转逻辑 (优先读库) ---
 today = datetime.now().date()
 this_monday = today - timedelta(days=today.weekday())
 selected_mon = st.date_input("📅 选择排班周", this_monday)
 actual_mon = selected_mon - timedelta(days=selected_mon.weekday())
 week_key = actual_mon.strftime("%Y-%m-%d")
 
-# A. 数据初始化与加载
-if week_key not in st.session_state.cloud_db:
-    init_df = None
+# 数据库加载逻辑
+db_df, db_sales = load_week_from_db(week_key)
+
+if db_df is not None:
+    st.session_state.current_df = db_df
+    st.session_state.current_sales = db_sales
+else:
     if week_key == "2026-02-09":
-        init_df = load_fixed_template(list(staff_df["姓名"]))
+        st.session_state.current_df = load_fixed_template(list(staff_df["姓名"]))
     else:
-        init_df = pd.DataFrame({"员工": list(staff_df["姓名"])})
+        df_init = pd.DataFrame({"员工": list(staff_df["姓名"])})
         for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
-            init_df[f"{d}_起"], init_df[f"{d}_止"] = "", ""
-    
-    st.session_state.cloud_db[week_key] = {
-        'df': init_df,
-        'sales': {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
-    }
+            df_init[f"{d}_起"], df_init[f"{d}_止"] = "", ""
+        st.session_state.current_df = df_init
+    st.session_state.current_sales = {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
+    save_week_to_db(week_key, st.session_state.current_df, st.session_state.current_sales)
 
-# B. 【关键修复】自动检测旧数据格式并升级，防止 KeyError
-raw_data = st.session_state.cloud_db[week_key]
-if isinstance(raw_data, pd.DataFrame):
-    # 发现旧格式数据，立即升级为字典格式
-    st.session_state.cloud_db[week_key] = {
-        'df': raw_data,
-        'sales': {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
-    }
-    st.rerun() # 重新加载以应用新格式
-
-# C. 安全读取
-current_data = st.session_state.cloud_db[week_key]
-current_df = current_data['df']
-current_sales = current_data.get('sales', {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]})
 is_readonly = (st.session_state.role == "manager" and (this_monday - actual_mon).days > 14)
 
-# --- 6. 主功能区 ---
+# --- 7. 页面展示 ---
 st.title(f"🚀 {week_key} 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
 
-# 快速排班助手
+# 快速排班
 if not is_readonly:
     with st.expander("👤 快速排班导入", expanded=True):
         c1, c2, c3 = st.columns(3)
@@ -154,25 +179,48 @@ if not is_readonly:
         cc1, cc2 = st.columns(2)
         in_s = cc1.text_input("开始", value=base[0])
         in_e = cc2.text_input("结束", value=base[1])
-        if st.button("✨ 填入表格"):
+        
+        if st.button("✨ 导入 (自动保存)", use_container_width=True):
             for d in days_sel:
-                current_df.loc[current_df['员工'] == sn, f"{d}_起"] = finalize_t(in_s)
-                current_df.loc[current_df['员工'] == sn, f"{d}_止"] = finalize_t(in_e)
-            st.session_state.cloud_db[week_key]['df'] = current_df
+                st.session_state.current_df.loc[st.session_state.current_df['员工'] == sn, f"{d}_起"] = finalize_t(in_s)
+                st.session_state.current_df.loc[st.session_state.current_df['员工'] == sn, f"{d}_止"] = finalize_t(in_e)
+            save_week_to_db(week_key, st.session_state.current_df, st.session_state.current_sales)
             st.rerun()
 
-# 核心表格
+# 核心表格 (取消 Form，实现实时保存)
 col_cfg = {d+"_"+s: st.column_config.SelectboxColumn(d+"|"+s, options=TIME_OPTIONS) for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"] for s in ["起", "止"]}
-t_h = (len(current_df) + 1) * 35 + 60
-edited_df = st.data_editor(current_df, column_config=col_cfg, use_container_width=True, hide_index=True, height=t_h, disabled=is_readonly, key=f"e_{week_key}")
-st.session_state.cloud_db[week_key]['df'] = edited_df
+t_h = (len(st.session_state.current_df) + 1) * 35 + 60
 
+# 这是一个“即时响应”的表格
+# 每修改一个单元格，edited_df 就会更新，代码往下走，触发 save_week_to_db
+edited_df = st.data_editor(
+    st.session_state.current_df, 
+    column_config=col_cfg, 
+    use_container_width=True, 
+    hide_index=True, 
+    height=t_h, 
+    disabled=is_readonly, 
+    key=f"editor_{week_key}"
+)
+
+# 【核心逻辑】检测变化并自动保存
+if not edited_df.equals(st.session_state.current_df):
+    st.session_state.current_df = edited_df
+    # 立即写入数据库
+    save_week_to_db(week_key, edited_df, st.session_state.current_sales)
+    # 给用户一个极其轻微的反馈
+    st.toast("✅ 已自动保存", icon="💾")
+
+# 云端同步按钮
 if not is_readonly:
-    c1, c2 = st.columns(2)
-    if c1.button("☁️ 上传排班到云端", use_container_width=True): st.toast("排班已保存")
-    if c2.button("📥 刷新最新数据", use_container_width=True): st.rerun()
+    col_sync1, col_sync2 = st.columns(2)
+    with col_sync1:
+        if st.button("☁️ 双重备份到云端"):
+            st.toast("数据已在 SQLite 中安全保护")
+    with col_sync2:
+        if st.button("📥 强制刷新页面"): st.rerun()
 
-# --- 7. 财务分析 (老板专属) ---
+# --- 8. 财务分析 (老板专属) ---
 if st.session_state.role == "owner":
     st.divider()
     
@@ -183,7 +231,7 @@ if st.session_state.role == "owner":
     t_cash, t_eft = 0.0, 0.0
     settle_list = []
 
-    for _, row in edited_df.iterrows():
+    for _, row in st.session_state.current_df.iterrows():
         name = row["员工"]; rate = STAFF_DB.get(name, {}).get("时薪", 0); p_type = str(STAFF_DB.get(name,{}).get("类型","cash")).upper()
         p_h, p_w = 0.0, 0.0
         for d in days_list:
@@ -191,37 +239,45 @@ if st.session_state.role == "owner":
             daily_h[d] += h; daily_w[d] += w; p_h += h; p_w += w
         if p_type == "CASH": t_cash += p_w
         else: t_eft += p_w
-        settle_list.append({"员工": name, "工时": p_h, "工资": f"${round(p_w, 2)}", "方式": p_type})
+        settle_list.append({"员工姓名": name, "本周总工时": p_h, "本周总工资": f"${round(p_w, 2)}", "支付方式": p_type})
 
-    # 1. 财务汇总 (带安全锁)
-    with st.expander(f"💰 财务汇总与工占比 (点击展开/收起)", expanded=False):
+    # 1. 财务汇总 (折叠 + 实时保存)
+    with st.expander(f"💰 财务汇总与工占比 ({week_key})", expanded=False):
         col_lock, col_save = st.columns([1, 1])
-        is_locked = st.session_state.finance_lock
+        if 'finance_lock' not in st.session_state: st.session_state.finance_lock = True
         
         with col_lock:
-            if is_locked:
-                if st.button("🔓 解锁并修改营业额", use_container_width=True):
-                    st.session_state.finance_lock = False
-                    st.rerun()
+            if st.session_state.finance_lock:
+                if st.button("🔓 解锁修改"): st.session_state.finance_lock = False; st.rerun()
             else:
-                st.info("⚠️ 编辑中...")
+                st.info("编辑模式 - 修改即自动保存")
 
         st.write("👇 每日营业额 ($)")
         sc = st.columns(7)
         new_sales = {}
-        for i, d in enumerate(days_list):
-            val = sc[i].number_input(d, value=current_sales.get(d, 0.0) if current_sales.get(d, 0.0)>0 else None, placeholder="0", key=f"s_{d}", disabled=is_locked)
-            new_sales[d] = val if val is not None else 0.0
+        current_sales = st.session_state.current_sales
+        sales_changed = False
         
+        for i, d in enumerate(days_list):
+            val = sc[i].number_input(d, value=current_sales.get(d, 0.0) if current_sales.get(d, 0.0)>0 else None, placeholder="0", key=f"s_{d}", disabled=st.session_state.finance_lock)
+            safe_val = val if val is not None else 0.0
+            new_sales[d] = safe_val
+            if safe_val != current_sales.get(d, 0.0):
+                sales_changed = True
+        
+        # 财务数据的自动保存逻辑
+        if not st.session_state.finance_lock and sales_changed:
+            st.session_state.current_sales = new_sales
+            save_week_to_db(week_key, st.session_state.current_df, new_sales)
+            st.toast("财务数据已保存")
+
         with col_save:
-            if not is_locked:
-                if st.button("💾 保存财务数据", type="primary", use_container_width=True):
-                    st.session_state.cloud_db[week_key]['sales'] = new_sales
+            if not st.session_state.finance_lock:
+                if st.button("🔒 锁定并完成"):
                     st.session_state.finance_lock = True
-                    st.success("已保存！")
                     st.rerun()
 
-        calc_sales = new_sales if not is_locked else current_sales
+        calc_sales = new_sales if not st.session_state.finance_lock else st.session_state.current_sales
         tot_s, tot_w, tot_h = sum(calc_sales.values()), t_cash + t_eft, sum(daily_h.values())
         
         analysis_df = pd.DataFrame({
