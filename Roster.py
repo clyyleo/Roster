@@ -4,33 +4,47 @@ import sqlite3
 import json
 from datetime import datetime, timedelta
 
-# 1. 深度纯净配置
+import streamlit as st
+
+# 1. 核武器级屏蔽：CSS + JavaScript 混合双打
 st.set_page_config(page_title="Roster Pro", layout="wide", initial_sidebar_state="collapsed")
-st.html("""
+st.components.v1.html("""
+    <script>
+        // 设置一个定时器，每 100 毫秒检查一次，一旦发现那个按钮就强行删除
+        var interval = setInterval(function() {
+            var header = window.parent.document.querySelector('header');
+            var footer = window.parent.document.querySelector('footer');
+            var manageBtn = window.parent.document.querySelector('[data-testid="manage-app-button"]');
+            var toolbar = window.parent.document.querySelector('[data-testid="stToolbar"]');
+            var decoration = window.parent.document.querySelector('[data-testid="stDecoration"]');
+            var viewerBadge = window.parent.document.querySelector('.viewerBadge_container__1QSob');
+            
+            if (header) header.style.display = 'none';
+            if (footer) footer.style.display = 'none';
+            if (toolbar) toolbar.style.display = 'none';
+            if (decoration) decoration.style.display = 'none';
+            if (viewerBadge) viewerBadge.style.display = 'none';
+            
+            // 针对 Manage App 按钮的物理删除
+            var buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(function(btn) {
+                if (btn.innerText === "Manage app" || btn.title === "Manage app") {
+                    btn.style.display = 'none';
+                    btn.style.visibility = 'hidden';
+                    btn.remove(); // 直接从 DOM 树中移除
+                }
+            });
+        }, 500); // 每0.5秒扫荡一次
+    </script>
     <style>
-    header, footer, #MainMenu {visibility: hidden !important; height: 0 !important;}
-    [data-testid="stStatusWidget"], button[title="Manage app"], 
-    iframe[title="manage-app-button"], .stAppDeployButton, [data-testid="stToolbar"],
-    #viewer-badge, .viewerBadge_container__1QSob, div[class*="viewerBadge"] {
-        display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important;
-    }
-    .block-container { padding-top: 1rem !important; }
-    
-    /* 自动保存状态提示 */
-    .auto-save-status {
-        position: fixed;
-        bottom: 10px;
-        right: 10px;
-        background-color: #d4edda;
-        color: #155724;
-        padding: 5px 10px;
-        border-radius: 5px;
-        font-size: 0.8rem;
-        opacity: 0.8;
-        z-index: 9999;
-    }
+        /* 备用 CSS 屏蔽 */
+        header, footer, [data-testid="stToolbar"], .viewerBadge_container__1QSob {
+            visibility: hidden !important; 
+            height: 0 !important;
+            display: none !important;
+        }
     </style>
-""")
+""", height=0, width=0)
 
 # --- 2. SQLite 数据库层 ---
 DB_FILE = "roster_realtime.db"
