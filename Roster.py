@@ -34,30 +34,24 @@ st.components.v1.html("""
     .block-container { padding-top: 1rem !important; }
     
     /* === 预览表格核心美化 (Preview Mode Styles) === */
-    
-    /* 表头：加大、加黑、全大写 */
     thead tr th {
-        font-size: 1.4rem !important;      /* 字号加大 (约22px) */
-        font-weight: 900 !important;       /* 最粗字体 */
-        color: #000000 !important;         /* 纯黑文字 */
-        background-color: #f0f2f6 !important; /* 浅灰背景强调 */
-        text-transform: uppercase !important; /* MON/TUE 大写 */
-        text-align: center !important;     /* 居中 */
-        border-bottom: 2px solid #000 !important; /* 底部加粗黑线 */
-        padding: 10px !important;          /* 增加内边距 */
+        font-size: 1.4rem !important;
+        font-weight: 900 !important;
+        color: #000000 !important;
+        background-color: #f0f2f6 !important;
+        text-transform: uppercase !important;
+        text-align: center !important;
+        border-bottom: 2px solid #000 !important;
+        padding: 10px !important;
     }
-    
-    /* 表格内容：清晰、居中 */
     tbody tr td {
-        font-size: 1.15rem !important;     /* 内容字号也加大 (约18px) */
-        font-weight: 600 !important;       /* 半粗体，清晰可见 */
+        font-size: 1.15rem !important;
+        font-weight: 600 !important;
         color: #333 !important;
-        text-align: center !important;     /* 居中 */
-        vertical-align: middle !important; /* 垂直居中 */
-        border-bottom: 1px solid #ddd !important; /* 分隔线 */
+        text-align: center !important;
+        vertical-align: middle !important;
+        border-bottom: 1px solid #ddd !important;
     }
-    
-    /* 员工列特别强调 */
     tbody tr td:first-child {
         font-weight: 800 !important;
         background-color: #fafafa !important;
@@ -84,7 +78,6 @@ def load_week_from_db(week_key):
     conn.close()
     if row:
         try:
-            # io.StringIO 修复文件读取报错
             df = pd.read_json(io.StringIO(row[0]))
             sales = json.loads(row[1])
             return df, sales
@@ -244,18 +237,14 @@ is_readonly = (st.session_state.role == "manager" and (this_monday - actual_mon)
 
 # --- 8. 主界面 ---
 if st.session_state.preview_mode:
-    # === 预览模式 (适合截图) ===
     st.title("📅 Roster Preview")
-    
     preview_df = generate_preview_df(st.session_state.current_df)
     st.table(preview_df)
-    
     if st.button("⬅️ Back to Edit", use_container_width=True):
         st.session_state.preview_mode = False
         st.rerun()
 
 else:
-    # === 编辑模式 ===
     st.title(f"🚀 {week_key} 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
     
     if not is_readonly:
@@ -321,7 +310,15 @@ else:
                 daily_h[d] += h; daily_w[d] += w; p_h += h; p_w += w
             if p_type == "CASH": t_cash += p_w
             else: t_eft += p_w
-            settle_list.append({"员工姓名": name, "本周总工时": p_h, "本周总工资": f"${round(p_w, 2)}", "支付方式": p_type})
+            
+            # 【工时格式化核心逻辑】
+            # 如果是整数(38.0)，显示为38；如果是小数(38.5)，显示为38.5
+            if p_h.is_integer():
+                disp_h = f"{int(p_h)}"
+            else:
+                disp_h = f"{round(p_h, 2)}"
+            
+            settle_list.append({"员工姓名": name, "本周总工时": disp_h, "本周总工资": f"${round(p_w, 2)}", "支付方式": p_type})
 
         with st.expander(f"💰 财务汇总与工占比 ({week_key})", expanded=False):
             col_lock, col_save = st.columns([1, 1])
