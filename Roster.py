@@ -2,27 +2,53 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import json
+import io  # <--- 新增核心修复库
 from datetime import datetime, timedelta
 
-# 1. 深度纯净配置
+# 1. 深度纯净配置 & 增强版 JS 屏蔽
 st.set_page_config(page_title="Roster Pro", layout="wide", initial_sidebar_state="collapsed")
-st.html("""
+st.components.v1.html("""
+    <script>
+        // 疯狂模式：每 50 毫秒扫描一次，发现 Manage app 立即移除
+        setInterval(function() {
+            var buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(function(btn) {
+                // 模糊匹配：包含 Manage app 或者是那个特定的图标按钮
+                if (btn.innerText.includes("Manage app") || btn.title === "Manage app" || btn.getAttribute("data-testid") === "manage-app-button") {
+                    btn.style.display = 'none';
+                    btn.style.visibility = 'hidden';
+                    btn.remove();
+                }
+            });
+            // 隐藏顶栏装饰
+            var decoration = window.parent.document.querySelector('[data-testid="stDecoration"]');
+            if (decoration) decoration.style.display = 'none';
+            
+            // 隐藏 toolbar
+            var toolbar = window.parent.document.querySelector('[data-testid="stToolbar"]');
+            if (toolbar) toolbar.style.display = 'none';
+
+            // 隐藏 viewer badge
+            var badges = window.parent.document.querySelectorAll('.viewerBadge_container__1QSob');
+            badges.forEach(b => b.style.display = 'none');
+        }, 50); 
+    </script>
     <style>
+    /* CSS 双重保险 */
     header, footer, #MainMenu {visibility: hidden !important; height: 0 !important;}
-    [data-testid="stStatusWidget"], button[title="Manage app"], 
-    iframe[title="manage-app-button"], .stAppDeployButton, [data-testid="stToolbar"],
-    #viewer-badge, .viewerBadge_container__1QSob, div[class*="viewerBadge"] {
-        display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important;
+    [data-testid="stStatusWidget"], .stAppDeployButton, 
+    [data-testid="stToolbar"], #viewer-badge {
+        display: none !important; visibility: hidden !important;
     }
     .block-container { padding-top: 1rem !important; }
     
-    /* 预览模式下的特殊样式：大字体，紧凑 */
-    .preview-table { font-family: sans-serif; }
+    /* 预览模式样式：大字号，居中，适合手机查看 */
+    .preview-table { font-size: 1.2rem !important; }
     </style>
-""")
+""", height=0)
 
 # --- 2. SQLite 数据库层 ---
-DB_FILE = "roster_screenshot.db"
+DB_FILE = "roster_screenshot_fixed.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -39,13 +65,21 @@ def load_week_from_db(week_key):
     row = c.fetchone()
     conn.close()
     if row:
-        return pd.read_json(row[0]), json.loads(row[1])
+        try:
+            # 【核心修复点】使用 io.StringIO 包装字符串，防止被误认为文件名
+            df = pd.read_json(io.StringIO(row[0]))
+            sales = json.loads(row[1])
+            return df, sales
+        except Exception as e:
+            st.error(f"数据读取错误: {e}")
+            return None, None
     return None, None
 
 def save_week_to_db(week_key, df, sales):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    roster_json = df.to_json()
+    # 强制不使用索引，减少 JSON 体积
+    roster_json = df.to_json(orient='records') 
     sales_json = json.dumps(sales)
     c.execute("INSERT OR REPLACE INTO weekly_data (week_key, roster_json, sales_json) VALUES (?, ?, ?)",
               (week_key, roster_json, sales_json))
@@ -83,53 +117,56 @@ def calc_wage(s, e, rate):
         return round(actual, 2), round(actual * rate, 2)
     except: return 0.0, 0.0
 
-# --- 4. 辅助功能：生成简易英文排班表 ---
+# --- 4. 预览生成逻辑 ---
 def simplify_time(t_str):
-    """将 08:00 转换为 8，将 14:00 转换为 2"""
+    """格式转换：08:00 -> 8, 14:30 -> 2:30"""
     if not t_str or t_str == "": return ""
     try:
         h, m = map(int, t_str.split(':'))
-        # 转换为12小时制逻辑 (8->8, 14->2, 18->6)
         disp_h = h if h <= 12 else h - 12
-        # 如果是整点，不显示分钟
-        if m == 0:
-            return f"{disp_h}"
-        else:
-            return f"{disp_h}:{m:02d}"
-    except:
-        return ""
+        if m == 0: return f"{disp_h}"
+        else: return f"{disp_h}:{m:02d}"
+    except: return ""
 
 def generate_preview_df(df):
-    """生成全英文、简易格式的预览表"""
+    """生成适合截图的 DataFrame"""
     preview_data = []
-    days_map = {
-        "周一": "Mon", "周二": "Tue", "周三": "Wed", "周四": "Thu", 
-        "周五": "Fri", "周六": "Sat", "周日": "Sun"
-    }
+    days_map = {"周一": "Mon", "周二": "Tue", "周三": "Wed", "周四": "Thu", "周五": "Fri", "周六": "Sat", "周日": "Sun"}
     
     for _, row in df.iterrows():
         row_data = {"Staff": row["员工"]}
+        has_shift = False
         for cn_day, en_day in days_map.items():
-            s = row[f"{cn_day}_起"]
-            e = row[f"{cn_day}_止"]
+            s = row.get(f"{cn_day}_起", "")
+            e = row.get(f"{cn_day}_止", "")
             if s and e:
-                # 生成如 "8-2" 的格式
                 row_data[en_day] = f"{simplify_time(s)}-{simplify_time(e)}"
+                has_shift = True
             else:
-                row_data[en_day] = "-"
-        preview_data.append(row_data)
+                row_data[en_day] = "" # 空班留白
+        if has_shift: # 只显示有班的人，或者全显示
+            preview_data.append(row_data)
     
+    # 如果全空，为了格式也显示
+    if not preview_data:
+        preview_data = [{"Staff": row["员工"]} for _, row in df.iterrows()]
+        
     return pd.DataFrame(preview_data)
 
 # --- 5. 初始模板 ---
 def load_fixed_template(staff_list):
     days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    df = pd.DataFrame({"员工": staff_list})
-    for d in days: df[f"{d}_起"], df[f"{d}_止"] = "", ""
+    # 创建带列名的空 DataFrame
+    columns = ["员工"] + [f"{d}_{s}" for d in days for s in ["起", "止"]]
+    df = pd.DataFrame(columns=columns)
+    df["员工"] = staff_list
+    df = df.fillna("") # 填充空字符串防止 NaN 问题
+    
     def set_s(name, idxs, s, e):
         for i in idxs:
-            df.loc[df['员工'].str.contains(name, case=False, na=False), f"{days[i]}_起"] = s
-            df.loc[df['员工'].str.contains(name, case=False, na=False), f"{days[i]}_止"] = e
+            mask = df['员工'].str.contains(name, case=False, na=False)
+            df.loc[mask, f"{days[i]}_起"] = s
+            df.loc[mask, f"{days[i]}_止"] = e
 
     set_s("WANG", [0, 3, 4], "14:00", "18:00")
     set_s("WANG", [1, 2], "08:00", "14:00")
@@ -173,44 +210,48 @@ selected_mon = st.date_input("📅 选择排班周", this_monday)
 actual_mon = selected_mon - timedelta(days=selected_mon.weekday())
 week_key = actual_mon.strftime("%Y-%m-%d")
 
+# 加载逻辑
 db_df, db_sales = load_week_from_db(week_key)
 
 if db_df is not None:
     st.session_state.current_df = db_df
     st.session_state.current_sales = db_sales
 else:
+    # 新周初始化
     if week_key == "2026-02-09":
         st.session_state.current_df = load_fixed_template(list(staff_df["姓名"]))
     else:
-        df_init = pd.DataFrame({"员工": list(staff_df["姓名"])})
-        for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
-            df_init[f"{d}_起"], df_init[f"{d}_止"] = "", ""
+        # 这里的初始化要非常小心，确保结构正确
+        days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        columns = ["员工"] + [f"{d}_{s}" for d in days for s in ["起", "止"]]
+        df_init = pd.DataFrame(columns=columns)
+        df_init["员工"] = list(staff_df["姓名"])
+        df_init = df_init.fillna("")
         st.session_state.current_df = df_init
+        
     st.session_state.current_sales = {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
     save_week_to_db(week_key, st.session_state.current_df, st.session_state.current_sales)
 
 is_readonly = (st.session_state.role == "manager" and (this_monday - actual_mon).days > 14)
 
 # --- 8. 主界面 ---
-st.title(f"🚀 {week_key} 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
-
-# === 截图预览模式 ===
 if st.session_state.preview_mode:
-    st.markdown("### 📱 截图预览模式 (Landscape View)")
-    st.info("💡 请将手机横屏，截图后点击下方按钮返回编辑。")
+    # === 预览模式 (适合截图) ===
+    st.title("📅 排班表预览 (Screenshot)")
     
-    # 生成简易表
+    # 生成预览数据
     preview_df = generate_preview_df(st.session_state.current_df)
     
-    # 使用静态 Table 展示，更适合截图，无滚动条干扰
+    # 样式优化：居中，无索引
     st.table(preview_df)
     
-    if st.button("⬅️ 退出预览，返回编辑", use_container_width=True):
+    if st.button("⬅️ 返回编辑模式", use_container_width=True):
         st.session_state.preview_mode = False
         st.rerun()
 
 else:
-    # === 正常编辑模式 ===
+    # === 编辑模式 ===
+    st.title(f"🚀 {week_key} 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
     
     # 快速排班
     if not is_readonly:
@@ -250,16 +291,15 @@ else:
         save_week_to_db(week_key, edited_df, st.session_state.current_sales)
         st.toast("✅ 已自动保存", icon="💾")
 
-    # 底部按钮区
+    # 底部操作栏
     if not is_readonly:
         c1, c2 = st.columns(2)
         with c1:
-            # 新增的预览按钮
             if st.button("📱 生成截图预览 (Preview)", use_container_width=True):
                 st.session_state.preview_mode = True
                 st.rerun()
         with c2:
-            if st.button("📥 刷新页面"): st.rerun()
+            if st.button("📥 刷新页面", use_container_width=True): st.rerun()
 
     # --- 9. 财务分析 (老板专属) ---
     if st.session_state.role == "owner":
@@ -274,7 +314,9 @@ else:
             name = row["员工"]; rate = STAFF_DB.get(name, {}).get("时薪", 0); p_type = str(STAFF_DB.get(name,{}).get("类型","cash")).upper()
             p_h, p_w = 0.0, 0.0
             for d in days_list:
-                h, w = calc_wage(row[f"{d}_起"], row[f"{d}_止"], rate)
+                s = row.get(f"{d}_起", "")
+                e = row.get(f"{d}_止", "")
+                h, w = calc_wage(s, e, rate)
                 daily_h[d] += h; daily_w[d] += w; p_h += h; p_w += w
             if p_type == "CASH": t_cash += p_w
             else: t_eft += p_w
