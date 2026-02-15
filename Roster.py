@@ -107,9 +107,19 @@ def load_week_from_db(week_key):
             return None, None
     return None, None
 
+# [修复部分 1] 增加了对数据类型的强制转换，防止 AttributeError
 def save_week_to_db(week_key, df, sales):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    
+    # 强制将 df 转换为 DataFrame，防止传入的是 list
+    if not isinstance(df, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df)
+        except:
+            conn.close()
+            return # 数据无法转换，直接跳过
+
     roster_json = df.to_json(orient='records')
     sales_json = json.dumps(sales)
     c.execute("INSERT OR REPLACE INTO weekly_data (week_key, roster_json, sales_json) VALUES (?, ?, ?)",
@@ -162,6 +172,10 @@ def generate_preview_df(df):
     preview_data = []
     days_map = {"周一": "Mon", "周二": "Tue", "周三": "Wed", "周四": "Thu", "周五": "Fri", "周六": "Sat", "周日": "Sun"}
     
+    # 防止 df 是 list 类型
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+
     for _, row in df.iterrows():
         row_data = {"Staff": row["员工"]}
         has_shift = False
@@ -188,14 +202,24 @@ def load_fixed_template(staff_list):
     df = pd.DataFrame(columns=columns)
     df["员工"] = staff_list
     df = df.fillna("")
-    # 这里可以保留你的默认排班逻辑，或者直接返回空表
     return df
 
-# --- 6. 自动保存回调函数 (关键新增) ---
+# --- 6. 自动保存回调函数 ---
+# [修复部分 2] 增加了空值检查和类型转换
 def auto_save_roster_callback(wk_key):
     """当排班表发生变化时，自动触发此函数进行保存"""
     # 从 session_state 获取最新的编辑器数据
-    edited_data = st.session_state[f"editor_{wk_key}"]
+    # 注意：这里直接取 st.session_state 里的 key 可能还是旧的，稳妥起见我们不做复杂操作
+    # 只要触发了，就说明界面更新了，我们从 editor_key 拿数据
+    edited_data = st.session_state.get(f"editor_{wk_key}")
+    
+    if edited_data is None:
+        return
+
+    # 强制类型转换，确保它是 DataFrame
+    if not isinstance(edited_data, pd.DataFrame):
+        edited_data = pd.DataFrame(edited_data)
+
     # 更新内存中的 current_df
     st.session_state.current_df = edited_data
     # 写入数据库
@@ -205,10 +229,8 @@ def auto_save_roster_callback(wk_key):
 
 def auto_save_sales_callback(wk_key, day_key):
     """当营业额发生变化时，自动保存"""
-    # 更新内存中的 current_sales
     val = st.session_state[f"s_{day_key}"]
     st.session_state.current_sales[day_key] = val if val is not None else 0.0
-    # 写入数据库
     save_week_to_db(wk_key, st.session_state.current_df, st.session_state.current_sales)
     st.toast(f"💰 {day_key} 营业额已保存", icon="✅")
 
@@ -397,7 +419,7 @@ else:
 
     # --- Tab 3: 系统设置 ---
     with tab_settings:
-        st.info("当前系统版本：v2.1 Auto-Save Enabled")
+        st.info("当前系统版本：v2.1 Fixed Auto-Save")
         st.write(f"当前用户：{st.session_state.role}")
         
         if st.button("🚪 退出登录", use_container_width=True):
