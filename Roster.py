@@ -1,4 +1,58 @@
 import streamlit as st
+
+# 1. 设置页面配置：针对手机竖屏优化
+st.set_page_config(
+    page_title="店铺排班系统",
+    page_icon="📅",  # 这里可以换成你店铺的 logo
+    layout="centered", # 手机端用 centered 视觉更聚拢
+    initial_sidebar_state="collapsed" # 默认收起侧边栏，节省空间
+)
+
+# 2. 注入 CSS 样式：隐藏 Streamlit 的原生标记（汉堡菜单、Footer、红色只有线）
+# 这是为了让界面看起来更像独立 App，而不是网页
+hide_streamlit_style = """
+    <style>
+    /* 隐藏右上角汉堡菜单 */
+    #MainMenu {visibility: hidden;}
+    /* 隐藏底部的 'Made with Streamlit' */
+    footer {visibility: hidden;}
+    /* 隐藏顶部的彩色横条 */
+    header {visibility: hidden;}
+    
+    /* 优化手机端按钮大小，防止误触 */
+    div.stButton > button:first-child {
+        width: 100%;
+        height: 3em;
+        font-weight: bold;
+        border-radius: 10px;
+    }
+    
+    /* 调整表格字体大小，适应小屏幕 */
+    div[data-testid="stDataFrame"] {
+        font-size: 0.8rem;
+    }
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# 3. 布局逻辑优化：放弃侧边栏导航，改用顶部标签页 (Tabs)
+# 手机上点侧边栏很麻烦，Tab 更符合 App 操作习惯
+tab1, tab2, tab3 = st.tabs(["📅 排班表", "👥 员工管理", "⚙️ 设置"])
+
+with tab1:
+    st.header("今日排班")
+    # ... 这里放原本的排班显示代码 ...
+    # 建议：使用 st.dataframe(df, use_container_width=True) 确保表格撑满手机屏幕宽度
+
+with tab2:
+    st.header("员工状态")
+    # ... 这里放员工管理代码 ...
+
+with tab3:
+    st.write("系统设置")
+    # ... 其他功能 ...
+
+import streamlit as st
 import pandas as pd
 import sqlite3
 import json
