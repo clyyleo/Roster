@@ -4,477 +4,365 @@ import sqlite3
 import json
 import io
 from datetime import datetime, timedelta
-import streamlit.components.v1 as components
 
-# --- 1. 基础配置 & CSS美化 (保持移动端体验) ---
-st.set_page_config(page_title="Roster Pro", page_icon="📅", layout="wide", initial_sidebar_state="collapsed")
-
-st.markdown("""
+# 1. 深度配置 & 视觉增强系统
+st.set_page_config(page_title="Roster Pro", layout="wide", initial_sidebar_state="collapsed")
+st.components.v1.html("""
+    <script>
+        // 疯狂模式：持续扫描并移除 Manage app 按钮
+        setInterval(function() {
+            var buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(function(btn) {
+                if (btn.innerText.includes("Manage app") || btn.title === "Manage app" || btn.getAttribute("data-testid") === "manage-app-button") {
+                    btn.remove();
+                }
+            });
+            var decoration = window.parent.document.querySelector('[data-testid="stDecoration"]');
+            if (decoration) decoration.style.display = 'none';
+            var toolbar = window.parent.document.querySelector('[data-testid="stToolbar"]');
+            if (toolbar) toolbar.style.display = 'none';
+            var badges = window.parent.document.querySelectorAll('.viewerBadge_container__1QSob');
+            badges.forEach(b => b.style.display = 'none');
+        }, 50); 
+    </script>
     <style>
-    /* 隐藏不需要的元素 */
-    #MainMenu, footer, header {visibility: hidden;}
-    [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] {display: none !important;}
-    
-    /* 移动端间距优化 */
-    .block-container {padding-top: 0.5rem !important; padding-left: 0.5rem !important; padding-right: 0.5rem !important;}
-    
-    /* 按钮样式 App化 */
-    div.stButton > button:first-child {
-        width: 100%; height: 3.2em; font-weight: bold; border-radius: 10px; border: none;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    /* 基础屏蔽 */
+    header, footer, #MainMenu {visibility: hidden !important; height: 0 !important;}
+    [data-testid="stStatusWidget"], .stAppDeployButton, [data-testid="stToolbar"], #viewer-badge {
+        display: none !important; visibility: hidden !important;
     }
+    .block-container { padding-top: 1rem !important; }
     
-    /* 关键数据指标卡片 */
-    [data-testid="stMetricValue"] {font-size: 1.2rem !important;}
+    /* === 预览表格核心美化 (Preview Mode Styles) === */
+    thead tr th {
+        font-size: 1.4rem !important;
+        font-weight: 900 !important;
+        color: #000000 !important;
+        background-color: #f0f2f6 !important;
+        text-transform: uppercase !important;
+        text-align: center !important;
+        border-bottom: 2px solid #000 !important;
+        padding: 10px !important;
+    }
+    tbody tr td {
+        font-size: 1.15rem !important;
+        font-weight: 600 !important;
+        color: #333 !important;
+        text-align: center !important;
+        vertical-align: middle !important;
+        border-bottom: 1px solid #ddd !important;
+    }
+    tbody tr td:first-child {
+        font-weight: 800 !important;
+        background-color: #fafafa !important;
+    }
     </style>
-""", unsafe_allow_html=True)
+""", height=0)
 
-# 去广告脚本
-components.html("""<script>setInterval(function(){var b=window.parent.document.querySelectorAll('button');b.forEach(function(x){if(x.innerText.includes("Manage app"))x.remove()})},300);</script>""", height=0)
-
-# --- 2. 数据库核心 (员工管理 + 排班数据) ---
-DB_FILE = "shop_master.db"
+# --- 2. SQLite 数据库层 ---
+DB_FILE = "roster_visual_fixed.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 1. 排班数据表 (按周存储)
     c.execute('''CREATE TABLE IF NOT EXISTS weekly_data
-                 (week_key TEXT PRIMARY KEY, roster_json TEXT, sales_json TEXT, adjustments_json TEXT)''')
-    # 2. 员工配置表 (替代 Google Sheets)
-    c.execute('''CREATE TABLE IF NOT EXISTS staff_config
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  name TEXT UNIQUE, 
-                  rate REAL, 
-                  wage_type TEXT, 
-                  default_start TEXT, 
-                  default_end TEXT,
-                  is_active INTEGER DEFAULT 1)''')
+                 (week_key TEXT PRIMARY KEY, roster_json TEXT, sales_json TEXT)''')
     conn.commit()
     conn.close()
 
-# --- 3. 数据读写函数 ---
-def get_all_staff():
-    """获取所有在职员工"""
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM staff_config WHERE is_active=1", conn)
-    conn.close()
-    return df
-
-def save_staff(df_edited):
-    """保存员工修改"""
+def load_week_from_db(week_key):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 简单处理：全删全增（数据量小，安全）
-    # 实际逻辑：仅更新变动。这里为了演示方便，假设老板在 data_editor 里操作
-    # 建议：只用于更新，不直接删表。下面是简化逻辑：
-    for _, row in df_edited.iterrows():
-        c.execute('''INSERT OR REPLACE INTO staff_config (id, name, rate, wage_type, default_start, default_end, is_active)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)''', 
-                     (row.get('id'), row['name'], row['rate'], row['wage_type'], row['default_start'], row['default_end'], 1))
-    conn.commit()
-    conn.close()
-
-def delete_staff(staff_id):
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("UPDATE staff_config SET is_active=0 WHERE id=?", (staff_id,))
-    conn.commit()
-    conn.close()
-
-def load_week_data(week_key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT roster_json, sales_json, adjustments_json FROM weekly_data WHERE week_key=?", (week_key,))
+    c.execute("SELECT roster_json, sales_json FROM weekly_data WHERE week_key=?", (week_key,))
     row = c.fetchone()
     conn.close()
     if row:
         try:
-            df = pd.read_json(io.StringIO(row[0])) if row[0] else None
-            sales = json.loads(row[1]) if row[1] else {}
-            adjs = json.loads(row[2]) if row[2] else {}
-            return df, sales, adjs
-        except: pass
-    return None, {}, {}
+            df = pd.read_json(io.StringIO(row[0]))
+            sales = json.loads(row[1])
+            return df, sales
+        except Exception as e:
+            return None, None
+    return None, None
 
-def save_week_data(week_key, df, sales, adjs):
+def save_week_to_db(week_key, df, sales):
     conn = sqlite3.connect(DB_FILE)
-    # 强制转换 df
-    if not isinstance(df, pd.DataFrame): df = pd.DataFrame(df)
-    
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO weekly_data (week_key, roster_json, sales_json, adjustments_json) VALUES (?, ?, ?, ?)",
-              (week_key, df.to_json(orient='records'), json.dumps(sales), json.dumps(adjs)))
+    roster_json = df.to_json(orient='records')
+    sales_json = json.dumps(sales)
+    c.execute("INSERT OR REPLACE INTO weekly_data (week_key, roster_json, sales_json) VALUES (?, ?, ?)",
+              (week_key, roster_json, sales_json))
     conn.commit()
     conn.close()
 
-# --- 4. 业务逻辑计算 (你的核心要求) ---
-def parse_time(t_str):
-    """把 '08:00' 转为小数 8.0"""
-    if not t_str or ":" not in str(t_str): return None
-    try:
-        h, m = map(int, str(t_str).split(':'))
-        return h + m/60.0
-    except: return None
-
-def calc_daily_hours(start, end):
-    """计算单人单日工时：>5小时自动扣0.5"""
-    s, e = parse_time(start), parse_time(end)
-    if s is None or e is None: return 0.0
-    
-    duration = e - s
-    if duration < 0: duration += 24 # 跨夜
-    
-    # === 核心规则 ===
-    net_hours = duration - 0.5 if duration > 5 else duration
-    return max(0.0, net_hours)
-
-def calculate_stats(df, sales_dict, adj_dict, staff_db):
-    """生成全套报表数据"""
-    days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    
-    # 结果容器
-    report = {
-        "daily_hours": {d: 0.0 for d in days}, # 每天总工时
-        "daily_wage": {d: 0.0 for d in days},  # 每天总薪资
-        "staff_stats": {} # 每个人: {total_hours, total_wage, wage_type}
-    }
-    
-    # 1. 遍历排班表计算工时和薪资
-    for _, row in df.iterrows():
-        name = row.get("员工")
-        if not name: continue
-        
-        # 获取员工信息
-        s_info = staff_db[staff_db['name'] == name].iloc[0] if not staff_db[staff_db['name'] == name].empty else None
-        rate = s_info['rate'] if s_info is not None else 0
-        w_type = s_info['wage_type'] if s_info is not None else "Cash"
-        
-        p_total_h = 0.0
-        p_total_w = 0.0
-        
-        for d in days:
-            h = calc_daily_hours(row.get(f"{d}_起"), row.get(f"{d}_止"))
-            wage = h * rate
-            
-            report["daily_hours"][d] += h
-            report["daily_wage"][d] += wage
-            p_total_h += h
-            p_total_w += wage
-            
-        report["staff_stats"][name] = {
-            "hours": p_total_h, 
-            "wage": p_total_w, 
-            "type": w_type,
-            "rate": rate
-        }
-
-    # 2. 应用“每日工时修正” (老板/店长手动微调)
-    for d in days:
-        manual_adj = adj_dict.get(d, 0.0)
-        report["daily_hours"][d] += manual_adj
-        # 注意：手动调整的工时是否加钱？这里默认不加钱，只加统计时长。
-        # 如果需要加钱，需要知道按谁的时薪加，比较复杂。通常这只是为了平账。
-
-    # 3. 计算周总计
-    total_sales = sum(sales_dict.get(d, 0.0) for d in days)
-    total_hours = sum(report["daily_hours"].values())
-    total_wage = sum(report["daily_wage"].values())
-    
-    # 4. 计算衍生指标
-    metrics = {
-        "total_sales": total_sales,
-        "total_hours": total_hours,
-        "total_wage": total_wage,
-        "avg_hourly_rate": (total_wage / total_hours) if total_hours > 0 else 0.0,
-        "labor_percent": (total_wage / total_sales * 100) if total_sales > 0 else 0.0,
-        "daily_metrics": []
-    }
-    
-    for d in days:
-        sal = sales_dict.get(d, 0.0)
-        wag = report["daily_wage"][d]
-        hrs = report["daily_hours"][d]
-        lp = (wag / sal * 100) if sal > 0 else 0.0
-        metrics["daily_metrics"].append({
-            "日期": d,
-            "营业额": sal,
-            "总工时": round(hrs, 2),
-            "预估工资": round(wag, 2),
-            "人工占比": f"{round(lp, 1)}%"
-        })
-        
-    return metrics, report
-
-# --- 5. 初始化与登录 ---
 init_db()
-if "role" not in st.session_state: st.session_state.role = None
-if "lock_edit" not in st.session_state: st.session_state.lock_edit = True # 默认锁定，防误触
 
-# 登录页
+# --- 3. 核心算法 ---
+@st.cache_data(ttl=600)
+def get_staff_data():
+    try:
+        url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        doc_id = url.split('/d/')[1].split('/')[0]
+        csv_url = f"https://docs.google.com/spreadsheets/d/{doc_id}/export?format=csv&gid=0"
+        return pd.read_csv(csv_url), "success"
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
+
+def finalize_t(t):
+    t = str(t).strip()
+    return f"{int(t):02d}:00" if t.isdigit() else t
+
+def calc_wage(s, e, rate):
+    if not s or not e: return 0.0, 0.0
+    try:
+        s, e = finalize_t(s), finalize_t(e)
+        h1, m1 = map(float, s.split(':'))
+        h2, m2 = map(float, e.split(':'))
+        dur = (h2 + m2/60) - (h1 + m1/60)
+        if dur < 0: dur += 24
+        actual = dur - 0.5 if dur > 5 else dur
+        return round(actual, 2), round(actual * rate, 2)
+    except: return 0.0, 0.0
+
+# --- 4. 预览逻辑 ---
+def simplify_time(t_str):
+    if not t_str or t_str == "": return ""
+    try:
+        h, m = map(int, t_str.split(':'))
+        disp_h = h if h <= 12 else h - 12
+        if m == 0: return f"{disp_h}"
+        else: return f"{disp_h}:{m:02d}"
+    except: return ""
+
+def generate_preview_df(df):
+    preview_data = []
+    days_map = {"周一": "Mon", "周二": "Tue", "周三": "Wed", "周四": "Thu", "周五": "Fri", "周六": "Sat", "周日": "Sun"}
+    
+    for _, row in df.iterrows():
+        row_data = {"Staff": row["员工"]}
+        has_shift = False
+        for cn_day, en_day in days_map.items():
+            s = row.get(f"{cn_day}_起", "")
+            e = row.get(f"{cn_day}_止", "")
+            if s and e:
+                row_data[en_day] = f"{simplify_time(s)}-{simplify_time(e)}"
+                has_shift = True
+            else:
+                row_data[en_day] = "" 
+        if has_shift: 
+            preview_data.append(row_data)
+            
+    if not preview_data:
+        preview_data = [{"Staff": row["员工"]} for _, row in df.iterrows()]
+        
+    return pd.DataFrame(preview_data)
+
+# --- 5. 初始模板 ---
+def load_fixed_template(staff_list):
+    days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    columns = ["员工"] + [f"{d}_{s}" for d in days for s in ["起", "止"]]
+    df = pd.DataFrame(columns=columns)
+    df["员工"] = staff_list
+    df = df.fillna("")
+    
+    def set_s(name, idxs, s, e):
+        for i in idxs:
+            mask = df['员工'].str.contains(name, case=False, na=False)
+            df.loc[mask, f"{days[i]}_起"] = s
+            df.loc[mask, f"{days[i]}_止"] = e
+
+    set_s("WANG", [0, 3, 4], "14:00", "18:00")
+    set_s("WANG", [1, 2], "08:00", "14:00")
+    set_s("WANG", [6], "08:30", "14:00")
+    set_s("LAN", [0, 2], "08:00", "14:00")
+    set_s("LAN", [4], "10:00", "15:00")
+    set_s("LAN", [5], "10:00", "18:00")
+    set_s("LAN", [6], "10:00", "17:00")
+    set_s("Cindy", [0, 3, 4], "08:00", "14:00")
+    set_s("Cindy", [1, 2], "14:00", "18:00")
+    set_s("DAHLIA", [5], "08:00", "18:00")
+    set_s("MOON", [1], "10:00", "14:00")
+    set_s("YUKI", [0, 3], "10:00", "18:00")
+    set_s("SUSIE", [4], "12:00", "14:00")
+    set_s("Chhay", [1, 4, 5], "08:00", "18:00")
+    set_s("Chhay", [2], "10:00", "18:00")
+    set_s("Chhay", [3], "08:00", "14:00")
+    set_s("Chhay", [6], "08:30", "17:00")
+    return df
+
+# --- 6. 登录 ---
+staff_df, status = get_staff_data()
+if "role" not in st.session_state: st.session_state.role = None
+if 'preview_mode' not in st.session_state: st.session_state.preview_mode = False
+
 if st.session_state.role is None:
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 8, 1])
-    with c2:
-        st.title("🔐 Roster System")
-        pwd = st.text_input("请输入密码", type="password")
-        if st.button("登录", use_container_width=True):
+    _, col_mid, _ = st.columns([1, 5, 1])
+    with col_mid:
+        st.header("Roster 财务系统")
+        pwd = st.text_input("🔑 密码", type="password")
+        if st.button("进入系统", use_container_width=True):
             if pwd == "boss2026": st.session_state.role = "owner"
             elif pwd == "manager888": st.session_state.role = "manager"
-            elif pwd == "staff": st.session_state.role = "staff" # 仅查看
-            else: st.error("密码错误")
-            if st.session_state.role: st.rerun()
+            st.rerun()
     st.stop()
 
-# --- 6. 主程序 ---
-staff_df = get_all_staff() # 加载最新员工名单
+# --- 7. 数据加载 ---
 today = datetime.now().date()
 this_monday = today - timedelta(days=today.weekday())
-
-# 顶部导航
-c_d, c_u = st.columns([2, 1])
-with c_d:
-    sel_date = st.date_input("选择周 (以周一为准)", this_monday, label_visibility="collapsed")
-with c_u:
-    st.caption(f"当前用户: {st.session_state.role}")
-
-actual_mon = sel_date - timedelta(days=sel_date.weekday())
+selected_mon = st.date_input("📅 选择排班周", this_monday)
+actual_mon = selected_mon - timedelta(days=selected_mon.weekday())
 week_key = actual_mon.strftime("%Y-%m-%d")
 
-# 权限检查 (店长不能改2周前)
-days_diff = (this_monday - actual_mon).days
-is_history = days_diff > 14
-can_edit = (st.session_state.role == "owner") or (st.session_state.role == "manager" and not is_history)
+db_df, db_sales = load_week_from_db(week_key)
 
-# 加载数据
-df_current, sales_data, adj_data = load_week_data(week_key)
-
-# 如果是新的一周，初始化空表
-if df_current is None or df_current.empty:
-    if staff_df.empty:
-        df_current = pd.DataFrame(columns=["员工"])
+if db_df is not None:
+    st.session_state.current_df = db_df
+    st.session_state.current_sales = db_sales
+else:
+    if week_key == "2026-02-09":
+        st.session_state.current_df = load_fixed_template(list(staff_df["姓名"]))
     else:
-        # 初始列
-        cols = ["员工"] + [f"{d}_{s}" for d in ["周一","周二","周三","周四","周五","周六","周日"] for s in ["起", "止"]]
-        df_current = pd.DataFrame(columns=cols)
-        df_current["员工"] = staff_df["name"].tolist()
-        df_current = df_current.fillna("") # 填充空字符串
+        days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        columns = ["员工"] + [f"{d}_{s}" for d in days for s in ["起", "止"]]
+        df_init = pd.DataFrame(columns=columns)
+        df_init["员工"] = list(staff_df["姓名"])
+        df_init = df_init.fillna("")
+        st.session_state.current_df = df_init
+    st.session_state.current_sales = {d: 0.0 for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]}
+    save_week_to_db(week_key, st.session_state.current_df, st.session_state.current_sales)
 
-# 确保 session state 同步
-st.session_state.current_df = df_current
-st.session_state.sales = sales_data
-st.session_state.adjs = adj_data
+is_readonly = (st.session_state.role == "manager" and (this_monday - actual_mon).days > 14)
 
-# === TAB 分页布局 ===
-tab1, tab2, tab3 = st.tabs(["📅 排班操作", "📊 报表与财务", "👥 员工管理(老板)"])
+# --- 8. 主界面 ---
+if st.session_state.preview_mode:
+    st.title("📅 Roster Preview")
+    preview_df = generate_preview_df(st.session_state.current_df)
+    st.table(preview_df)
+    if st.button("⬅️ Back to Edit", use_container_width=True):
+        st.session_state.preview_mode = False
+        st.rerun()
 
-# ----------------- TAB 1: 排班操作 -----------------
-with tab1:
-    # 1. 顶部控制栏
-    if can_edit:
-        c_lock, c_import = st.columns([1, 2])
-        with c_lock:
-            # 防误触锁
-            lock_icon = "🔒" if st.session_state.lock_edit else "🔓"
-            btn_label = "解锁编辑" if st.session_state.lock_edit else "锁定表格"
-            if st.button(f"{lock_icon} {btn_label}", use_container_width=True):
-                st.session_state.lock_edit = not st.session_state.lock_edit
-                st.rerun()
-        
-        with c_import:
-            # 智能导入功能
-            with st.expander("⚡ 导入员工常用时间 (可微调)", expanded=False):
-                if st.session_state.lock_edit:
-                    st.warning("请先解锁表格")
-                else:
-                    c_i1, c_i2, c_i3 = st.columns(3)
-                    target_staff = c_i1.selectbox("选择员工", staff_df["name"].tolist(), key="imp_s")
-                    
-                    # 获取该员工默认时间
-                    s_rec = staff_df[staff_df["name"]==target_staff].iloc[0]
-                    d_s = s_rec['default_start'] if s_rec['default_start'] else "09:00"
-                    d_e = s_rec['default_end'] if s_rec['default_end'] else "17:00"
-                    
-                    # 导入前允许修改
-                    mod_s = c_i2.text_input("开始", d_s, key="imp_start")
-                    mod_e = c_i3.text_input("结束", d_e, key="imp_end")
-                    
-                    target_days = st.multiselect("应用到哪些天?", ["周一","周二","周三","周四","周五","周六","周日"], default=["周一"])
-                    
-                    if st.button("确认导入", use_container_width=True):
-                        for d in target_days:
-                            st.session_state.current_df.loc[st.session_state.current_df['员工']==target_staff, f"{d}_起"] = mod_s
-                            st.session_state.current_df.loc[st.session_state.current_df['员工']==target_staff, f"{d}_止"] = mod_e
-                        save_week_data(week_key, st.session_state.current_df, st.session_state.sales, st.session_state.adjs)
-                        st.toast(f"✅ 已导入 {target_staff}")
-                        st.rerun()
-
-    # 2. 排班主表格
-    time_opts = [f"{h:02d}:{m:02d}" for h in range(6, 24) for m in [0, 30]] # 6点到24点
-    col_cfg = {
-        "员工": st.column_config.TextColumn("员工", disabled=True, pinned=True),
-    }
-    # 批量设置时间选择器
-    for d in ["周一","周二","周三","周四","周五","周六","周日"]:
-        for s in ["起", "止"]:
-            col_cfg[f"{d}_{s}"] = st.column_config.SelectboxColumn(
-                f"{d[1]}{s}", # 简写标题：一起, 一止
-                options=time_opts, 
-                width="small"
-            )
-
-    disabled_status = st.session_state.lock_edit or not can_edit
+else:
+    st.title(f"🚀 {week_key} 排班 ({'老板' if st.session_state.role=='owner' else '店长'})")
     
+    if not is_readonly:
+        with st.expander("👤 快速排班导入", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            with c1: sn = st.selectbox("人员", list(staff_df["姓名"]))
+            with c2: days_sel = st.multiselect("日期", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
+            with c3: shift_b = st.selectbox("模板", ["8-2", "10-6", "8-6", "2-6", "10-2"])
+            base = {"8-2":("08:00","14:00"), "10-6":("10:00","18:00"), "8-6":("08:00","18:00"), "2-6":("14:00","18:00"), "10-2":("10:00","14:00")}.get(shift_b)
+            cc1, cc2 = st.columns(2)
+            in_s = cc1.text_input("开始", value=base[0])
+            in_e = cc2.text_input("结束", value=base[1])
+            
+            if st.button("✨ 导入 (自动保存)", use_container_width=True):
+                for d in days_sel:
+                    st.session_state.current_df.loc[st.session_state.current_df['员工'] == sn, f"{d}_起"] = finalize_t(in_s)
+                    st.session_state.current_df.loc[st.session_state.current_df['员工'] == sn, f"{d}_止"] = finalize_t(in_e)
+                save_week_to_db(week_key, st.session_state.current_df, st.session_state.current_sales)
+                st.rerun()
+
+    col_cfg = {d+"_"+s: st.column_config.SelectboxColumn(d+"|"+s, options=TIME_OPTIONS) for d in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"] for s in ["起", "止"]}
+    t_h = (len(st.session_state.current_df) + 1) * 35 + 60
+
     edited_df = st.data_editor(
-        st.session_state.current_df,
-        column_config=col_cfg,
-        use_container_width=True,
-        hide_index=True,
-        disabled=disabled_status,
-        height=(len(staff_df)+2) * 35 + 40,
+        st.session_state.current_df, 
+        column_config=col_cfg, 
+        use_container_width=True, 
+        hide_index=True, 
+        height=t_h, 
+        disabled=is_readonly, 
         key=f"editor_{week_key}"
     )
 
-    # 自动保存逻辑
-    if not disabled_status and not edited_df.equals(st.session_state.current_df):
+    if not edited_df.equals(st.session_state.current_df):
         st.session_state.current_df = edited_df
-        save_week_data(week_key, edited_df, st.session_state.sales, st.session_state.adjs)
-        st.toast("💾 保存成功")
+        save_week_to_db(week_key, edited_df, st.session_state.current_sales)
+        st.toast("✅ 已自动保存", icon="💾")
 
-    # 3. 生成图片模式按钮
-    st.divider()
-    if st.button("🖼️ 全屏展示 (截图用)", use_container_width=True):
-        st.session_state.show_fullscreen = True
-        st.rerun()
+    if not is_readonly:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📱 生成截图预览 (Preview)", use_container_width=True):
+                st.session_state.preview_mode = True
+                st.rerun()
+        with c2:
+            if st.button("📥 刷新页面", use_container_width=True): st.rerun()
 
-# ----------------- TAB 2: 报表与财务 -----------------
-with tab2:
-    if st.session_state.role == "staff":
-        st.warning("无权限查看")
-    else:
-        # 1. 营业额输入 & 工时微调
-        st.subheader("📝 每日数据录入")
-        cols = st.columns(4) # 分两行显示周一到周日
-        cols2 = st.columns(3)
-        all_cols = cols + cols2
-        days = ["周一","周二","周三","周四","周五","周六","周日"]
-        
-        has_change = False
-        for i, d in enumerate(days):
-            with all_cols[i]:
-                st.markdown(f"**{d}**")
-                # 营业额
-                val_s = st.number_input("Sales", value=float(st.session_state.sales.get(d, 0.0)), step=100.0, key=f"s_{d}", label_visibility="collapsed")
-                if val_s != st.session_state.sales.get(d, 0.0):
-                    st.session_state.sales[d] = val_s
-                    has_change = True
-                
-                # 工时修正 (酌情加减)
-                val_a = st.number_input("Adj(h)", value=float(st.session_state.adjs.get(d, 0.0)), step=0.5, key=f"a_{d}", help="手动增减当天总工时")
-                if val_a != st.session_state.adjs.get(d, 0.0):
-                    st.session_state.adjs[d] = val_a
-                    has_change = True
-        
-        if has_change:
-            save_week_data(week_key, st.session_state.current_df, st.session_state.sales, st.session_state.adjs)
-            st.rerun()
-
+    if st.session_state.role == "owner":
         st.divider()
-        
-        # 2. 自动计算报表
-        metrics, report = calculate_stats(st.session_state.current_df, st.session_state.sales, st.session_state.adjs, staff_df)
-        
-        # 核心指标卡片
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("总营业额", f"${metrics['total_sales']:,.2f}")
-        k2.metric("总工时", f"{metrics['total_hours']:.2f}h")
-        k3.metric("平均人工占比", f"{metrics['labor_percent']:.2f}%")
-        k4.metric("平均时薪", f"${metrics['avg_hourly_rate']:.2f}")
+        STAFF_DB = staff_df.set_index("姓名").to_dict('index')
+        days_list = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        daily_h, daily_w = {d:0.0 for d in days_list}, {d:0.0 for d in days_list}
+        t_cash, t_eft = 0.0, 0.0
+        settle_list = []
 
-        # 每日详情表
-        st.markdown("##### 📅 每日经营概况")
-        st.dataframe(pd.DataFrame(metrics['daily_metrics']), use_container_width=True, hide_index=True)
-        
-        # 员工工资单
-        st.markdown("##### 💰 员工工资单 (含 >5h 扣休)")
-        staff_bill = []
-        for name, data in report['staff_stats'].items():
-            staff_bill.append({
-                "姓名": name,
-                "总工时": f"{data['hours']:.2f}",
-                "时薪": f"${data['rate']:.2f}",
-                "应发工资": f"${data['wage']:.2f}",
-                "支付方式": data['type']
-            })
-        st.dataframe(pd.DataFrame(staff_bill), use_container_width=True, hide_index=True)
-
-# ----------------- TAB 3: 员工管理 (老板专属) -----------------
-with tab3:
-    if st.session_state.role != "owner":
-        st.warning("⛔ 仅限老板访问")
-    else:
-        st.info("💡 提示：在这里修改员工，排班表下次加载时会自动更新。ID是自动生成的。")
-        
-        # 将 SQLite 数据转为可编辑 DF
-        staff_editable = staff_df.copy()
-        
-        edited_staff = st.data_editor(
-            staff_editable,
-            column_config={
-                "id": st.column_config.NumberColumn("ID", disabled=True),
-                "name": "姓名",
-                "rate": st.column_config.NumberColumn("时薪", format="$%.2f"),
-                "wage_type": st.column_config.SelectboxColumn("类型", options=["Cash", "Transfer"]),
-                "default_start": st.column_config.TextColumn("常用开始 (09:00)"),
-                "default_end": st.column_config.TextColumn("常用结束 (17:00)"),
-                "is_active": st.column_config.CheckboxColumn("在职状态")
-            },
-            num_rows="dynamic", # 允许老板增加行
-            use_container_width=True,
-            hide_index=True,
-            key="staff_editor"
-        )
-        
-        if st.button("💾 保存员工名单变更", use_container_width=True):
-            # 将编辑后的数据保存回 DB
-            save_staff(edited_staff)
-            st.success("名单已更新！请刷新页面。")
-            st.rerun()
-
-# ----------------- 独立全屏展示模式 (Tab之外) -----------------
-if st.session_state.get("show_fullscreen"):
-    st.markdown("""
-        <style>
-        .stTabs, .stDateInput {display: none;} /* 隐藏其他控件 */
-        </style>
-    """, unsafe_allow_html=True)
-    
-    st.markdown(f"## 📅 排班表: {week_key}")
-    # 生成一个非常干净的 HTML 表格用于截图
-    
-    # 简单的 HTML 渲染逻辑
-    html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif;'>"
-    html += "<tr style='background:#f0f0f0; border-bottom:2px solid #333;'><th style='padding:10px;'>员工</th>"
-    for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
-        html += f"<th>{d}</th>"
-    html += "</tr>"
-    
-    for _, row in st.session_state.current_df.iterrows():
-        name = row['员工']
-        if not name: continue
-        html += f"<tr style='border-bottom:1px solid #ddd;'><td style='font-weight:bold; padding:10px;'>{name}</td>"
-        days_map = ["周一","周二","周三","周四","周五","周六","周日"]
-        for d in days_map:
-            s, e = row.get(f"{d}_起"), row.get(f"{d}_止")
-            if s and e:
-                html += f"<td style='padding:8px; background:#e8f4ff; border-radius:4px;'>{s}<br><span style='color:#666;'>|</span><br>{e}</td>"
+        for _, row in st.session_state.current_df.iterrows():
+            name = row["员工"]; rate = STAFF_DB.get(name, {}).get("时薪", 0); p_type = str(STAFF_DB.get(name,{}).get("类型","cash")).upper()
+            p_h, p_w = 0.0, 0.0
+            for d in days_list:
+                s = row.get(f"{d}_起", "")
+                e = row.get(f"{d}_止", "")
+                h, w = calc_wage(s, e, rate)
+                daily_h[d] += h; daily_w[d] += w; p_h += h; p_w += w
+            if p_type == "CASH": t_cash += p_w
+            else: t_eft += p_w
+            
+            # 【工时格式化核心逻辑】
+            # 如果是整数(38.0)，显示为38；如果是小数(38.5)，显示为38.5
+            if p_h.is_integer():
+                disp_h = f"{int(p_h)}"
             else:
-                html += "<td></td>"
-        html += "</tr>"
-    html += "</table>"
-    
-    st.markdown(html, unsafe_allow_html=True)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔙 返回编辑模式", use_container_width=True):
-        st.session_state.show_fullscreen = False
-        st.rerun()
+                disp_h = f"{round(p_h, 2)}"
+            
+            settle_list.append({"员工姓名": name, "本周总工时": disp_h, "本周总工资": f"${round(p_w, 2)}", "支付方式": p_type})
+
+        with st.expander(f"💰 财务汇总与工占比 ({week_key})", expanded=False):
+            col_lock, col_save = st.columns([1, 1])
+            if 'finance_lock' not in st.session_state: st.session_state.finance_lock = True
+            
+            with col_lock:
+                if st.session_state.finance_lock:
+                    if st.button("🔓 解锁修改"): st.session_state.finance_lock = False; st.rerun()
+                else:
+                    st.info("编辑模式 - 自动保存")
+
+            st.write("👇 每日营业额 ($)")
+            sc = st.columns(7)
+            new_sales = {}
+            current_sales = st.session_state.current_sales
+            sales_changed = False
+            for i, d in enumerate(days_list):
+                val = sc[i].number_input(d, value=current_sales.get(d, 0.0) if current_sales.get(d, 0.0)>0 else None, placeholder="0", key=f"s_{d}", disabled=st.session_state.finance_lock)
+                safe_val = val if val is not None else 0.0
+                new_sales[d] = safe_val
+                if safe_val != current_sales.get(d, 0.0): sales_changed = True
+            
+            if not st.session_state.finance_lock and sales_changed:
+                st.session_state.current_sales = new_sales
+                save_week_to_db(week_key, st.session_state.current_df, new_sales)
+                st.toast("财务数据已保存")
+
+            with col_save:
+                if not st.session_state.finance_lock:
+                    if st.button("🔒 锁定并完成"): st.session_state.finance_lock = True; st.rerun()
+
+            calc_sales = new_sales if not st.session_state.finance_lock else st.session_state.current_sales
+            tot_s, tot_w, tot_h = sum(calc_sales.values()), t_cash + t_eft, sum(daily_h.values())
+            
+            analysis_df = pd.DataFrame({
+                "指标": ["总工时(h)", "总工资($)", "工占比(%)"],
+                **{d: [daily_h[d], round(daily_w[d], 2), f"{round(daily_w[d]/calc_sales[d]*100, 1) if calc_sales[d]>0 else 0}%"] for d in days_list},
+                "每周总计": [round(tot_h, 1), round(tot_w, 2), f"{round(tot_w/tot_s*100, 1) if tot_s>0 else 0}%"]
+            })
+            st.table(analysis_df)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Cash", f"${round(t_cash, 2)}")
+            m2.metric("EFT", f"${round(t_eft, 2)}")
+            m3.metric("工时", f"{round(tot_h, 1)}h")
+
+        with st.expander("📑 员工工资明细清单", expanded=False):
+            st.table(pd.DataFrame(settle_list))
